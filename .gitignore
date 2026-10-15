@@ -1,0 +1,22 @@
+# Rust
+/target
+Cargo.lock
+
+# Node / Tauri frontend
+node_modules
+dist
+dist-ssr
+
+# Tauri
+src-tauri/target
+src-tauri/gen/schemas
+
+# macOS
+.DS_Store
+*.dmg
+*.app
+
+# Editors / OS
+.idea
+.vscode
+*.swp
