@@ -1,6 +1,6 @@
 # ClipOCR — Design Spec
 
-- **Status:** DRAFT — under roster consultation (Argus, Repo Auditor)
+- **Status:** REV 2 — Argus findings folded (2026-10-15); Repo Auditor audit pending fold
 - **Date:** 2026-10-15
 - **Author:** Frikkie (orchestrator), with FerriScribe lineage
 
@@ -12,8 +12,7 @@ either paid SaaS (TextSniper, CleanShot X) or embedded inside a large app (Ferri
 screenshot-OCR feature). Andre wants a **standalone, cross-platform, menu-bar utility**
 that does exactly one thing well: press a hotkey → drag a rectangle → the OCR'd text is
 on the clipboard. Mac is the priority platform; Linux and Windows must work from the
-same codebase. All OCR must be **on-device** — no network, no accounts, no PHI-style
-privacy concerns.
+same codebase. All OCR must be **on-device** — no network, no accounts.
 
 ## Solution
 
@@ -21,99 +20,148 @@ A Tauri 2 + Rust desktop app, single menu-bar/tray presence, one global hotkey.
 
 Flow (mirrors FerriScribe v0.75, which is battle-tested):
 
-1. **Trigger** — global hotkey (`CmdOrCtrl+Alt+O` default, configurable), or tray menu
-   item "Capture". Also expose a CLI flag (`--capture-ocr`) for scripted/utility use that
-   delegates to the running instance (single-instance plugin).
-2. **Region select** — platform-native selection UI:
-   - macOS: `screencapture -i -x <file>` (the one tool with no stdout mode; capture to
-     private app dir, shred before OCR returns).
-   - Linux Wayland: `slurp` (geometry) + `grim -g <geom> -` (PNG on stdout, no disk).
-   - Linux X11 / Windows: transparent fullscreen overlay window + `xcap` screen API.
-     Overlay reports the drag rect via a Tauri command; hide overlay, wait grace, capture.
-3. **OCR** — on-device only. OCR engine is a **pluggable trait** with per-platform
-   default implementations:
-   - **macOS (priority, default):** Apple Vision `VNRecognizeTextRequest` — fast,
-     accurate, free, on-device. Ship as a small Swift helper binary invoked per capture,
-     or a Rust binding. This is the flagship experience.
-   - **Linux (default):** Tesseract via `leptess`/`tesseract` crate (bundled traineddata
-     for en; docs for adding languages).
-   - **Windows (default):** Windows.Media.Ocr (WinRT) via `windows` crate, or Tesseract
-     fallback — decide at implementation with a thin abstraction.
-   - All engines return (text, confidence) so the app can reject empty/low-confidence
-     results.
-4. **Clipboard** — write text from Rust side (`tauri-plugin-clipboard-manager`), never
-   pixels. Typed outcomes: `copied` / `cancelled` / `empty` / `in_progress` (single-flight
-   guard rejects concurrent triggers, RAII guard releases on panic — FerriScribe pattern).
-5. **Feedback** — completion toast/notification (best-effort, `osascript`/`notify-send`/
-   PowerShell pattern from FerriScribe). Optional always-on-top progress pill on macOS.
+1. **Trigger** — global hotkey (`CmdOrCtrl+Alt+O` default, configurable), tray menu
+   "Capture", or CLI flag (`--capture-ocr`) delegating via single-instance.
+2. **Region select** — platform-native selection UI (see Capture Matrix).
+3. **OCR** — on-device only, behind a pluggable trait (see OCR Engines).
+4. **Clipboard** — text written from Rust side (`tauri-plugin-clipboard-manager` /
+   arboard), never pixels. Typed outcomes: `copied` / `cancelled` / `empty` /
+   `permission_denied` / `low_confidence` / `in_progress` (single-flight guard, RAII
+   release on panic — FerriScribe pattern).
+5. **Feedback** — best-effort completion notification (`osascript` / `notify-send` /
+   PowerShell toast; Windows toast shows generic identity without an AppUserModelID —
+   documented best-effort). Always-on-top progress pill on macOS while the engine runs
+   (proven FerriScribe code — keep). On `in_progress` from a headless trigger (hotkey/
+   CLI), fire the notification fallback ("capture already running") — FerriScribe
+   swallowed this for its webview; a tray-only app must surface it.
 
-**Non-goals:** no translation, no cloud OCR, no file saving, no OCR history, no settings
-surface beyond hotkey + engine + language. No accounts. No analytics.
+**Non-goals:** no translation, no cloud OCR, no file saving, no OCR history, no accounts,
+no analytics. Screenshot saving/history may follow later — not in v1.
 
 ## User Stories
 
-1. As a user on macOS, I press the hotkey, drag over a paused video frame, and the
-   subtitle text is on my clipboard in <1s, OCR'd locally by Apple Vision.
-2. As a Linux user on Wayland (Omarchy), I press the hotkey (compositor-bound) or tray
-   item, drag with slurp, and grim captures exactly that region to OCR.
-3. As a Windows user, I press the hotkey, drag on a locked PDF render, and get text.
-4. As a power user, I run `clipocr --capture-ocr` from a script and text lands on the
-   clipboard even if the app was cold-starting (single-instance delegation).
-5. As a user, I can re-trigger mid-capture and get a clear "already running" signal
-   rather than stacked overlays.
-6. As a user on a Retina display, dragging on a secondary scaled monitor captures and
-   OCRs the right pixels (scale-factor handling, FerriScribe's pure/unit-tested geometry
-   helpers).
+1. macOS: hotkey → drag over a paused video frame → subtitle text on clipboard in <1s,
+   OCR'd locally by Apple Vision.
+2. Linux Wayland (wlroots — Sway/Hyprland/Omarchy): hotkey (compositor-bound) or tray →
+   slurp drag → grim captures exactly that region.
+3. Windows: hotkey → drag on a locked PDF render → text on clipboard via
+   Windows.Media.Ocr.
+4. Power user: `clipocr --capture-ocr` from a script lands text on the clipboard even on
+   cold start (single-instance delegation; first instance self-executes the capture once
+   tray + plugins are ready — never in raw argv parsing, to avoid racing init).
+5. Re-trigger mid-capture → clear "already running" feedback (notification on headless
+   triggers), never stacked overlays.
+6. Secondary scaled monitor (2x) drag captures and OCRs the right pixels (scale-factor
+   geometry; on Retina macOS `screencapture` emits physical pixels natively — story 6 is
+   really about the overlay platforms).
+7. **First-run permission flow (macOS):** before any capture, preflight Screen Recording
+   with `CGPreflightScreenCaptureAccess()`; on denial the app shows a typed
+   `permission_denied` outcome with a System Settings deep link
+   (`x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture`),
+   and the tray shows a warning state. **Critical:** without permission, `screencapture`
+   succeeds but returns only the desktop wallpaper — a silent, wrong result. This flow
+   prevents that.
+8. Launch at login (tauri-plugin-autostart) — v1 setting; a menu-bar utility that
+   doesn't offer it feels broken.
+9. OCR language setting: macOS enumerates the runtime-supported Vision language list and
+   gates the setting to it; Linux ships eng traineddata with docs for more.
 
-## Implementation Decisions
+## Capture Matrix (port from FerriScribe `screen_capture.rs` — don't redesign)
 
-1. **Tauri 2 + Rust core** — matches FerriScribe/TailDrop GUI stack; one codebase, three
-   desktop targets. `tauri-plugin-global-shortcut`, `tauri-plugin-single-instance`,
-   `tauri-plugin-clipboard-manager`.
-2. **Capture matrix borrowed from FerriScribe** (`screen_capture.rs`): macOS
-   `screencapture -i -x`, Wayland `slurp`+`grim`, X11/Windows overlay+`xcap` with
-   monitor-union geometry, physical→logical scale mapping, PNG signature check, 600s
-   capture deadline, 120s overlay deadline, 250ms hide-grace. Port the module + its unit
-   tests (they're platform-agnostic pure geometry) and trim FerriScribe-specific PHI
-   stringency to plain hygiene (no `/tmp` shared writes, no logging of pixels — ever).
-3. **OCR via trait `OcrEngine { fn recognize(&self, png: &[u8]) -> Result<OcrResult> }`**
-   with per-platform default + config override. macVision is the shipped default on
-   macOS; on Linux/Windows default to Tesseract/WinRT. Thread via `spawn_blocking`.
-4. **Menu bar/tray only** — no main window. Tray menu: Capture, separator, hotkey
-   display, Open Settings (hotkey/language/engine), Quit. On macOS use `TrayIcon` menu
-   bar item; Windows/Linux system tray with the same items.
-5. **No persistent storage** beyond a small config file (`confy` or raw TOML in app data
-   dir): hotkey string, engine override, language, line-break-collapse toggle.
-6. **Feedback without a window**: toast/notification best-effort (reuse FerriScribe
-   `spawn_notification`), plus a tiny always-on-top progress pill on macOS while the
-   engine runs.
+| Platform | Mechanism | Notes |
+|---|---|---|
+| macOS | `screencapture -i -x <file>` | 0700 private dir + 0600 pre-created file + read-then-unlink BEFORE OCR; drop FerriScribe's shred (non-PHI) but keep the hygiene and ordering. Preflight TCC per story 7. |
+| Linux Wayland (wlroots only) | `slurp` (geometry) + `grim -g <geom> -` (PNG on stdout) | wlr-screencopy. GNOME/KDE Wayland do NOT serve grim → v1 non-goal, or XDG Screenshot portal fallback via ashpd (decision at implementation; document). |
+| Linux X11 / Windows | transparent overlay + `xcap` | **One overlay window PER MONITOR**, each with its own scale factor and CSS→physical mapping — a single union overlay mis-maps drags on mixed-DPI setups. Alternatively explicitly document mixed-DPI as a known v1 limitation. |
+
+Port VERBATIM (Argus #11 — proven, unit-tested): `parse_slurp_geometry` + rejects,
+`clamp_rect` (i64 edge math), `is_png`, `monitor_union`, `capture_screen_region_png`
+alpha-force, deadlines (600s capture / 120s overlay), `OVERLAY_HIDE_GRACE` (make it a
+named constant with a comment that slow compositors may need it raised), `InFlightGuard`,
+`indicator_position`, typed outcomes.
+
+Known limitations (one line each in README): xcap/overlay cannot draw above elevated
+(admin) Windows apps (UIPI); DRM-protected video captures black on every platform.
+
+## OCR Engines (trait `OcrEngine { fn recognize(&self, png: &[u8]) -> Result<OcrResult> }`)
+
+- **OcrResult carries (text, per-engine confidence)** — thresholds are per-engine
+  constants, NOT one global cut: Vision confidence (per-candidate 0–1, calibrated per
+  revision) and Tesseract mean confidence are not comparable. `empty` / `low_confidence`
+  are typed outcomes.
+- **macOS (default):** Apple Vision IN-PROCESS via Rust `objc2-vision` /
+  `objc2-foundation` bindings. `VNImageRequestHandler.performRequests` is SYNCHRONOUS —
+  callable from `spawn_blocking`, read `request.results()` after. **A Swift helper
+  binary is a second signed artifact** (its own cert, Contents/MacOS placement,
+  notarization, per-capture spawn) — only a documented fallback if the binding fights
+  the build. Either way, PNG via in-memory/stdin — no IPC file.
+- **Linux (default):** Tesseract via `leptess` with bundled `eng.traineddata`; decide
+  system-leptonica vs static build NOW (AppImage/bundled vs documented apt dependency)
+  and set `TESSDATA_PREFIX` to the bundled dir.
+- **Windows (default):** WinRT `Windows.Media.Ocr` via `windows` crate; detect
+  missing-language-pack errors distinctly from OCR failure; documented fallback chain
+  WinRT → Tesseract (bundled DLLs + traineddata — call out the distribution cost).
+
+## Implementation Decisions (rev 2 — Argus folds)
+
+1. **Tauri 2 + Rust core** — confirmed by review: macOS quality comes from the OCR engine
+   and capture mechanism, not the framework. Native Swift would abandon one-codebase;
+   Electron/Flutter buy nothing. Plugins: `global-shortcut`, `single-instance`,
+   `clipboard-manager`, `autostart`.
+2. **Signing IS in v1 scope** (was wrongly out): stable dev signing identity + notarized
+   release build. Ad-hoc rebuilds change cdhash every build → TCC re-prompts on EVERY dev
+   build; Gatekeeper blocks unsigned downloads. **Not sandboxed, direct distribution
+   only, no App Store** (sandbox forbids this capture model).
+3. **Config:** raw TOML via the `toml` crate in the app data dir (confy pulls deprecated
+   serde_yaml). Keys: hotkey string, engine override, language, line-break-collapse
+   toggle, launch-at-login.
+4. **Hotkey lifecycle (FerriScribe pattern, verbatim):** validate at save, idempotent
+   re-register, warn-and-degrade to tray + documented compositor binding to
+   `clipocr --capture-ocr`. global-shortcut is X11-only on Linux — Wayland `register()`
+   fails by design. **Add a tray-menu indicator when the hotkey is inactive** so the
+   failure is visible, not silent.
+5. **Clipboard caveats:** arboard on Wayland needs ext-data-control (fine on
+   Hyprland/KDE; GNOME only ≥48) — a failed write can look like success, so the smoke
+   matrix does write-then-read per target compositor; `wl-copy` fallback acceptable. X11
+   clipboard dies with the owning app — ClipOCR is resident so OK. Document that Linux
+   clipboard managers (cliphist etc.) will retain OCR'd text by design.
+6. **Tray menu:** Capture, separator, hotkey display (with inactive indicator),
+   engine/language display, Open Settings (hotkey/language/engine/launch-at-login),
+   About/version, Quit.
+7. **Privacy (honest line):** pixels never touch the clipboard — text only. But macOS
+   Universal Clipboard and Windows cloud clipboard DO sync text off-device when the user
+   enables them; text inherits OS clipboard behavior by design.
 
 ## Testing Decisions
 
-- **Unit:** port FerriScribe's geometry helpers (slurp geometry parse, clamp_rect,
-  indicator_position, PNG sniff, in-flight guard) — they're pure and already proven.
-- **Unit:** hotkey resolve/validate; outcome serialization; OCR trait contract with a
-  fake engine.
-- **Integration:** a `--capture-ocr-selftest` path that runs the full pipeline against a
-  generated on-screen test image and asserts clipboard content (machine-local; meaningful
-  on macOS, best-effort elsewhere). Validate manually on the Mac first.
-- **Manual smoke matrix** (macOS priority, then Omarchy Wayland, then Windows):
-  drag on video frame, secondary monitor at 2x scale, Esc-cancel, empty region,
-  concurrent trigger, cold-start CLI flag.
+- **Unit:** port FerriScribe's pure geometry helpers (slurp geometry parse, clamp_rect,
+  indicator_position, PNG sniff, in-flight guard) + hotkey resolve/validate, outcome
+  serialization, OCR trait contract with a fake engine.
+- **Integration:** `--capture-ocr-selftest` (dev-only marker — never ships a window in a
+  tray-only app) runs the pipeline against a generated on-screen test image and asserts
+  clipboard content. Meaningful on macOS; best-effort elsewhere. Manual smoke first.
+- **Manual smoke matrix** (macOS priority, then Omarchy Wayland, then Windows): video
+  frame drag, secondary monitor at 2x, Esc-cancel, empty region, concurrent trigger,
+  cold-start CLI, **first-run permission denial**, clipboard write-then-read on each
+  target compositor, "selection UI not in the shot" check.
+- **Verification before review:** `cargo test` green; `cargo tauri build` on macOS;
+  `git status` clean.
 
 ## Out of Scope
 
-- Cloud/API OCR, translation, screenshot saving/history (menu item may later offer
-  "copy image" — not now).
-- FerriScribe integration (this app is standalone; do not couple).
-- Auto-update, code signing, distribution beyond `cargo tauri build` artifacts.
+- Cloud/API OCR, translation, screenshot saving/history, FerriScribe integration,
+  auto-update.
+- GNOME/KDE Wayland (v1) unless the ashpd portal fallback lands at implementation.
+- Mixed-DPI multi-monitor on X11/Windows (v1) unless per-monitor overlays land.
 
 ## Further Notes
 
-- **Build rules (deferred AGENTS.md — pending Andre approval):** Rust 1.8x+, `cargo
-  tauri build`; `cargo test` must pass before review; keep OCR engines behind the trait;
-  never log pixel data; screenshots never touch the clipboard — text only.
+- **Build rules (deferred AGENTS.md — pending Andre approval):** Rust 1.8x+, `cargo tauri
+  build`; `cargo test` must pass before review; OCR engines stay behind the trait; never
+  log pixel data; screenshots never touch the clipboard — text only.
 - FerriScribe lineage files to mine: `screen_capture.rs`, `screenshot_ocr.rs` (hotkey,
   events, notification, single-flight), overlay Svelte view.
-- macOS screen-recording permission: app must request Screen Recording (TCC) — document
-  the prompt path; `screencapture` triggers it on first use.
+- Review trail: Argus design review 2026-10-15 (21 findings: 1 critical — TCC
+  silent-blank #8; 6 major — signing scope, per-monitor overlays, wlroots scoping,
+  in-process Vision, confidence-trap, WinRT language packs). Repo Auditor spec audit
+  pending.
