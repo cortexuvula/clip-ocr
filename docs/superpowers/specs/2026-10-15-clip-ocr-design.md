@@ -75,7 +75,7 @@ no analytics. Screenshot saving/history may follow later — not in v1.
 
 | Platform | Mechanism | Notes |
 |---|---|---|
-| macOS | `screencapture -i -x <file>` | 0700 private dir + 0600 pre-created file + read-then-unlink BEFORE OCR; drop FerriScribe's shred (non-PHI) but keep the hygiene and ordering. Preflight TCC per story 7. |
+| macOS | `screencapture -i -x <file>` | 0700 private dir + 0600 pre-created file + read-then-unlink BEFORE OCR; drop FerriScribe's shred (non-PHI) but keep the hygiene and ordering. Preflight TCC per story 7. **VERIFIED 2026-10-15 (macOS 26.6.2): screencapture REPLACES the pre-created file with a new inode at default mode 0644 — it does NOT truncate in place.** Re-assert `0600` via `set_permissions` on the O_NOFOLLOW-opened descriptor BEFORE the metadata check, or every capture fails validation. Do not trust the FerriScribe "same inode, mode preserved" comment — it is wrong on modern macOS. |
 | Linux Wayland (wlroots only) | `slurp` (geometry) + `grim -g <geom> -` (PNG on stdout) | wlr-screencopy. GNOME/KDE Wayland do NOT serve grim → explicit unsupported-state message (tray warning + notification), or XDG Screenshot portal fallback via ashpd (decision at implementation; document). Never claim general Wayland support beyond wlroots. |
 | Linux X11 / Windows | transparent overlay + `xcap` | **One overlay window PER MONITOR**, each with its own scale factor and CSS→physical mapping — a single union overlay mis-maps drags on mixed-DPI setups. |
 
