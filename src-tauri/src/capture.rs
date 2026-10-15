@@ -4,7 +4,7 @@ use crate::core::InFlightGuard;
 use crate::core::MAX_BYTES;
 use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(target_os = "macos")]
 use std::sync::{atomic::AtomicBool, Arc};
 use std::{path::PathBuf, time::Duration};
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(600);
