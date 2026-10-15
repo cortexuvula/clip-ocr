@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>ClipOCR</title><link rel="stylesheet" href="style.css"><script src="app.js" defer></script></head>
+<body>
+<main id="settings" hidden>
+  <h1>ClipOCR <small id="version"></small></h1>
+  <p>Screen text → clipboard. On-device, no network, no history.</p>
+  <form id="form">
+    <label>Global shortcut<input id="hotkey" autocomplete="off" required placeholder="CmdOrCtrl+Alt+O"></label>
+    <label>OCR engine<select id="engine"><option value="macVision">Apple Vision (on-device)</option></select></label>
+    <label>Recognition language<select id="language" required></select></label>
+    <label class="check"><input type="checkbox" id="collapse"> Collapse line breaks</label>
+    <label class="check"><input type="checkbox" id="login"> Launch at login</label>
+    <button type="submit">Save settings</button>
+  </form>
+  <p id="status" role="status" aria-live="polite"></p>
+  <footer>Pixels never touch the clipboard. Copied text inherits OS clipboard syncing and clipboard-manager history. ClipOCR stores no OCR history.</footer>
+</main>
+<div id="progress" hidden role="status">Recognizing text…</div>
+<main id="selftest" hidden>
+  <h1>Interactive synthetic selftest</h1>
+  <p>Requires a display and Screen Recording permission. Press Capture, drag ONLY over the sample text, then verify the outcome and clipboard. Do not capture private content.</p>
+  <div class="sample">ClipOCR TEST 123<br>Offline text recognition</div>
+  <button id="test-capture">Capture sample region…</button><p id="test-status" role="status"></p>
+</main>
+</body></html>

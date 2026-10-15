@@ -1,0 +1,8 @@
+[hidden] { display: none !important; }
+:root { font: 14px -apple-system, BlinkMacSystemFont, sans-serif; color-scheme: light dark; }
+body { margin: 0; } main { padding: 24px; max-width: 660px; } h1 { font-size: 24px; margin-top: 0; } small { font-size: 13px; opacity: .65; }
+p { line-height: 1.5; } label { display: block; margin: 15px 0; } input:not([type=checkbox]), select { display: block; box-sizing: border-box; width: 100%; padding: 8px; margin-top: 5px; font: inherit; }
+.check { display: flex; align-items: center; gap: 8px; } button { font: inherit; padding: 8px 16px; cursor: pointer; } button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #588bff; }
+footer { font-size: 12px; opacity: .75; line-height: 1.45; } #status { min-height: 24px; }
+body.pill { background: #141418; color: #fff; } #progress { height: 44px; display: grid; place-items: center; font-weight: 500; }
+.sample { background: white; color: black; padding: 24px; font-size: 32px; margin: 20px 0; }
