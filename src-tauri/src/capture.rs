@@ -1,12 +1,12 @@
 #[cfg(target_os = "macos")]
 use crate::core::InFlightGuard;
-use crate::core::{CaptureDevice, CaptureError, Failure, MAX_BYTES};
+#[cfg(any(target_os = "macos", test))]
+use crate::core::MAX_BYTES;
+use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;
-use std::{
-    path::PathBuf,
-    sync::{atomic::AtomicBool, Arc},
-    time::Duration,
-};
+#[cfg(any(target_os = "macos", test))]
+use std::sync::{atomic::AtomicBool, Arc};
+use std::{path::PathBuf, time::Duration};
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(600);
 pub const OVERLAY_SELECT_TIMEOUT: Duration = Duration::from_secs(120);
 /// Slow compositors may need this raised when overlay platforms are implemented.
