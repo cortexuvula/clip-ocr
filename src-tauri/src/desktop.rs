@@ -399,7 +399,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 storage::sweep(&dir).map_err(|_| "Cannot clean stale captures")?;
             }
             #[cfg(target_os = "macos")]
-            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            app.set_activation_policy(tauri::ActivationPolicy::Regular);
             let languages = engine::languages().unwrap_or_default();
             let loaded = Config::load(&root);
             let config_blocked = loaded.is_err();
@@ -461,10 +461,14 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 _instance_lock: lock,
             });
             // Small generated monochrome template icon; no external assets needed.
+            // A filled square with two text lines — reads clearly as "OCR" at
+            // menu-bar size (the old 1px hollow outline was nearly invisible).
             let mut pixels = vec![0u8; 22 * 22 * 4];
-            for y in 3..19 {
-                for x in 3..19 {
-                    if x == 3 || x == 18 || y == 3 || y == 18 || (y == 10 && x > 6 && x < 15) {
+            for y in 0..22 {
+                for x in 0..22 {
+                    let border = !(2..20).contains(&x) || !(2..20).contains(&y);
+                    let textline = (y == 8 || y == 13) && (4..18).contains(&x);
+                    if border || textline {
                         pixels[(y * 22 + x) * 4 + 3] = 255;
                     }
                 }
