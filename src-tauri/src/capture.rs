@@ -49,6 +49,7 @@ impl ScreenPermission for NativePermission {
 }
 pub struct PlatformCapture {
     pub root: PathBuf,
+    #[cfg(target_os = "macos")]
     live: Arc<AtomicBool>,
     #[cfg(target_os = "macos")]
     permission: Arc<dyn ScreenPermission>,
@@ -57,6 +58,7 @@ impl PlatformCapture {
     pub fn new(root: PathBuf) -> Self {
         Self {
             root,
+            #[cfg(target_os = "macos")]
             live: Arc::default(),
             #[cfg(target_os = "macos")]
             permission: Arc::new(NativePermission),
@@ -96,8 +98,10 @@ impl CaptureDevice for PlatformCapture {
 
 /// Synchronous child ownership is deliberate: Drop kills AND reaps before file
 /// cleanup, even on unwinding. A dropped Tokio handle alone cannot guarantee this.
+#[cfg(any(target_os = "macos", test))]
 #[cfg(unix)]
 struct ChildGuard(std::process::Child);
+#[cfg(any(target_os = "macos", test))]
 #[cfg(unix)]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -105,6 +109,7 @@ impl Drop for ChildGuard {
         let _ = self.0.wait();
     }
 }
+#[cfg(any(target_os = "macos", test))]
 #[cfg(unix)]
 fn capture_with_command(
     dir: &std::path::Path,
