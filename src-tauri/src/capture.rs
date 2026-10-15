@@ -107,7 +107,7 @@ fn capture_with_command(
     use std::{
         fs::OpenOptions,
         io::Read,
-        os::unix::fs::{MetadataExt, OpenOptionsExt},
+        os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         process::Stdio,
         time::Instant,
     };
@@ -164,6 +164,12 @@ fn capture_with_command(
         }
         Err(_) => return Err(CaptureError::Failed(Failure::Capture)),
     };
+    // screencapture can replace the pre-created 0600 inode with a new 0644
+    // file. The private 0700 directory confines it while the child runs; restore
+    // owner-only permissions before validation/read. Use the O_NOFOLLOW-opened
+    // descriptor, not a path chmod that could follow a replacement symlink.
+    file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        .map_err(|_| CaptureError::Failed(Failure::Capture))?;
     let meta = file
         .metadata()
         .map_err(|_| CaptureError::Failed(Failure::Capture))?;
@@ -250,6 +256,52 @@ mod tests {
             "killed child must never recreate a PNG later"
         );
     }
+    #[test]
+    fn replaced_capture_file_restores_private_mode_before_read_and_unlinks() {
+        use std::os::unix::fs::MetadataExt;
+        let root = tempfile::tempdir().unwrap();
+        let mut original = None;
+        let result = capture_with_command(root.path(), Duration::from_secs(1), |path| {
+            // Keep the original inode alive so the replacement cannot reuse it.
+            let file = std::fs::File::open(path).unwrap();
+            let inode = file.metadata().unwrap().ino();
+            original = Some(file);
+            let mut cmd = std::process::Command::new("/usr/bin/perl");
+            // Match real screencapture: replace, rather than truncate, then leave
+            // a fresh 0644 file regardless of the test process's current umask.
+            cmd.arg("-e")
+                .arg("unlink $ARGV[0] or die; open(my $out, '>', $ARGV[0]) or die; print $out 'synthetic'; close $out or die; chmod 0644, $ARGV[0] or die; my @st = stat $ARGV[0]; die if $st[1] == $ARGV[1] || ($st[2] & 0777) != 0644;")
+                .arg(path)
+                .arg(inode.to_string());
+            cmd
+        });
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        assert_eq!(original.unwrap().metadata().unwrap().len(), 0);
+        assert_eq!(result.unwrap(), b"synthetic");
+    }
+
+    #[test]
+    fn replacement_symlink_is_rejected_without_changing_target_permissions() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("capture");
+        std::fs::create_dir(&dir).unwrap();
+        let target = root.path().join("synthetic-target");
+        std::fs::write(&target, b"synthetic").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let result = capture_with_command(&dir, Duration::from_secs(1), |path| {
+            std::fs::remove_file(path).unwrap();
+            std::os::unix::fs::symlink(&target, path).unwrap();
+            std::process::Command::new("/usr/bin/true")
+        });
+        assert!(matches!(
+            result,
+            Err(CaptureError::Failed(Failure::Capture))
+        ));
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o777, 0o644);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
     #[test]
     fn spawn_cancel_read_failures_cleanup_and_read_then_unlink() {
         let t = tempfile::tempdir().unwrap();
