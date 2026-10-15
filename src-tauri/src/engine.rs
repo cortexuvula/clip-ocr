@@ -1,6 +1,8 @@
 //! Only the native, local Vision engine ships in the macOS spike. No provider
 //! resolution, remote overrides, helpers or IPC image files exist here.
-use crate::core::{EngineId, Failure, OcrEngine, OcrResult};
+#[cfg(target_os = "macos")]
+use crate::core::OcrResult;
+use crate::core::{EngineId, Failure, OcrEngine};
 use std::sync::Arc;
 // Vision candidate confidence is 0..1, NOT comparable to Tesseract's scale.
 pub const VISION_MIN_CONFIDENCE: f64 = 0.5;

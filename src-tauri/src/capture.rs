@@ -1,4 +1,6 @@
-use crate::core::{CaptureDevice, CaptureError, Failure, InFlightGuard, MAX_BYTES};
+#[cfg(target_os = "macos")]
+use crate::core::InFlightGuard;
+use crate::core::{CaptureDevice, CaptureError, Failure, MAX_BYTES};
 use async_trait::async_trait;
 use std::{
     path::PathBuf,
@@ -33,10 +35,13 @@ pub fn permission_granted() -> bool {
         false
     }
 }
+#[cfg(target_os = "macos")]
 trait ScreenPermission: Send + Sync {
     fn granted(&self) -> bool;
 }
+#[cfg(target_os = "macos")]
 struct NativePermission;
+#[cfg(target_os = "macos")]
 impl ScreenPermission for NativePermission {
     fn granted(&self) -> bool {
         permission_granted()
@@ -45,6 +50,7 @@ impl ScreenPermission for NativePermission {
 pub struct PlatformCapture {
     pub root: PathBuf,
     live: Arc<AtomicBool>,
+    #[cfg(target_os = "macos")]
     permission: Arc<dyn ScreenPermission>,
 }
 impl PlatformCapture {
@@ -52,6 +58,7 @@ impl PlatformCapture {
         Self {
             root,
             live: Arc::default(),
+            #[cfg(target_os = "macos")]
             permission: Arc::new(NativePermission),
         }
     }

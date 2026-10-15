@@ -454,7 +454,14 @@ mod tests {
             Status::InProgress
         );
         assert_eq!(captures.load(Ordering::SeqCst), 1);
-        tokio::time::sleep(Duration::from_millis(180)).await;
+        // The engine thread releases its lease asynchronously; poll for it to
+        // clear rather than sleeping a fixed margin (a fixed sleep flaked on
+        // loaded CI runners where the 150ms engine delay + scheduling could
+        // exceed the 180ms sleep).
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while p.busy() && std::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         assert!(!p.busy());
     }
     #[tokio::test]
