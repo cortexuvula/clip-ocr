@@ -188,11 +188,11 @@ jobs:
             pkg-config
 
       # macOS universal binary (arm64 + x86_64), signed with Developer ID and
-      # notarized. tauri-action REQUIRES all three of APPLE_API_KEY (contents),
-      # APPLE_API_KEY_ID, APPLE_API_ISSUER in its env — plus APPLE_API_KEY_PATH
-      # (a file path) — or it SKIPS notarization with only a warning. The .p8
-      # key material is in the APPLE_API_KEY secret; write it to a temp file
-      # and pass BOTH the contents and the path.
+      # notarized. Tauri's notarization env: APPLE_API_KEY = the ASC Key ID
+      # string (e.g. the <api_key> in AuthKey_<api_key>.p8) — NOT the .p8
+      # contents — plus APPLE_API_ISSUER and APPLE_API_KEY_PATH (a file path).
+      # The .p8 material lives in the APPLE_API_KEY secret; write it to a temp
+      # file whose path is APPLE_API_KEY_PATH, and pass the Key ID separately.
       - name: Write Apple notarization key
         if: matrix.os == 'macos-latest'
         shell: bash
@@ -210,8 +210,10 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.P12_PASSWORD }}
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          # Tauri's APPLE_API_KEY is the ASC Key ID string (the <api_key> in
+          # AuthKey_<api_key>.p8), NOT the .p8 contents. The .p8 material goes
+          # in the temp file that APPLE_API_KEY_PATH points to (written above).
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         with:
           releaseId: ${{ needs.create-release.outputs.release_id }}
