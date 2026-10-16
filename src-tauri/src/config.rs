@@ -11,12 +11,29 @@ pub struct Config {
     pub collapse_line_breaks: bool,
     pub launch_at_login: bool,
 }
+pub fn default_engine() -> EngineId {
+    if cfg!(target_os = "windows") {
+        EngineId::WinRt
+    } else if cfg!(target_os = "linux") {
+        EngineId::Tesseract
+    } else {
+        EngineId::MacVision
+    }
+}
+pub fn default_language() -> String {
+    if cfg!(target_os = "linux") {
+        // Tesseract tag; the engine also normalizes from macOS-style tags.
+        "eng".into()
+    } else {
+        "en-US".into()
+    }
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.into(),
-            engine: EngineId::MacVision,
-            language: "en-US".into(),
+            engine: default_engine(),
+            language: default_language(),
             collapse_line_breaks: false,
             launch_at_login: false,
         }
@@ -38,11 +55,16 @@ pub fn validate_hotkey(s: &str) -> Result<(), String> {
 impl Config {
     pub fn validate(&self, languages: &[String]) -> Result<(), String> {
         validate_hotkey(&self.hotkey)?;
-        if self.engine != EngineId::MacVision || !cfg!(target_os = "macos") {
+        let shipped = match self.engine {
+            EngineId::MacVision => cfg!(target_os = "macos"),
+            EngineId::Tesseract => cfg!(target_os = "linux"),
+            EngineId::WinRt => cfg!(target_os = "windows"),
+        };
+        if !shipped {
             return Err("Engine is not shipped on this platform".into());
         }
         if !languages.contains(&self.language) {
-            return Err("Language is not supported by this OS's Vision engine".into());
+            return Err("Language is not supported by this platform's OCR engine".into());
         }
         Ok(())
     }

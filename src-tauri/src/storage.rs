@@ -32,9 +32,11 @@ fn validate_metadata(is_dir: bool, symlink: bool, uid: u32, mode: u32) -> Result
 }
 #[cfg(not(unix))]
 pub fn assure_private_dir(path: &Path) -> Result<(), Failure> {
-    // Non-Unix builds store only preferences and display an unsupported-capture
-    // tray warning. Capture storage/ACLs MUST be implemented before enabling any
-    // Windows capture device; the Unix private-directory contract is not claimed.
+    // Windows: no POSIX mode bits, so the strongest portable check is a real
+    // directory that is not a reparse point (symlink/junction). ACL hardening
+    // (icacls) is out of scope for the initial cross-platform cut; the capture
+    // payload itself never touches this directory on Windows (in-memory WinRT
+    // frames), so no capture file is exposed to ACL gaps.
     match fs::create_dir(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}

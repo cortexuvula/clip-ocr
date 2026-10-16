@@ -11,6 +11,14 @@ pub fn create(id: EngineId) -> Result<Arc<dyn OcrEngine>, Failure> {
     if id == EngineId::MacVision {
         return Ok(Arc::new(MacVision));
     }
+    #[cfg(target_os = "linux")]
+    if id == EngineId::Tesseract {
+        return Ok(Arc::new(TesseractEngine));
+    }
+    #[cfg(target_os = "windows")]
+    if id == EngineId::WinRt {
+        return Ok(Arc::new(WinRtEngine));
+    }
     let _ = id;
     Err(Failure::Unsupported)
 }
@@ -19,7 +27,15 @@ pub fn languages() -> Result<Vec<String>, Failure> {
     {
         mac::languages()
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::languages()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        windows::languages()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         Err(Failure::Unsupported)
     }
@@ -91,6 +107,199 @@ mod mac {
         })
     }
 }
+#[cfg(target_os = "linux")]
+pub struct TesseractEngine;
+#[cfg(target_os = "linux")]
+impl OcrEngine for TesseractEngine {
+    fn recognize(&self, png: &[u8], language: &str) -> Result<OcrResult, Failure> {
+        linux::recognize(png, language)
+    }
+    fn confidence_threshold(&self) -> Option<f64> {
+        // Tesseract exposes word-level confidences but the Rust binding does
+        // not surface them per line; gate only on emptiness, not confidence.
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+mod linux {
+    use super::*;
+    use std::path::Path;
+
+    /// Tesseract's language codes are BCP-47-ish but NOT identical to the
+    /// macOS Vision tags the config may carry (e.g. "en-US" vs "eng"). Map the
+    /// common superset so a shared config.toml keeps working across platforms.
+    fn normalize(code: &str) -> String {
+        // tesseract-ocr uses "eng", "fra", "deu"... The first 3 chars of a tag
+        // are the ISO 639-2/3 code tesseract expects; fall back to en.
+        let base: String = code
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        let code = base.to_ascii_lowercase();
+        match code.as_str() {
+            "" => "eng".into(),
+            "en" | "enus" | "us" => "eng".into(),
+            "fra" | "fre" => "fra".into(),
+            "deu" | "ger" => "deu".into(),
+            _ => code,
+        }
+    }
+
+    pub fn languages() -> Result<Vec<String>, Failure> {
+        // /usr/share/tessdata is the standard install location for
+        // tesseract-ocr data files; also probe TESSDATA_PREFIX.
+        let mut dirs = Vec::new();
+        if let Ok(prefix) = std::env::var("TESSDATA_PREFIX") {
+            dirs.push(Path::new(&prefix).to_path_buf());
+        }
+        dirs.push(Path::new("/usr/share/tessdata").to_path_buf());
+        dirs.push(Path::new("/usr/local/share/tessdata").to_path_buf());
+        let mut langs = Vec::new();
+        for dir in dirs {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if let Some(base) = name.strip_suffix(".traineddata") {
+                    // osd is orientation data, not a usable OCR language.
+                    if base != "osd" {
+                        langs.push(base.to_owned());
+                    }
+                }
+            }
+        }
+        langs.sort();
+        langs.dedup();
+        if langs.is_empty() {
+            Err(Failure::Unsupported)
+        } else {
+            Ok(langs)
+        }
+    }
+
+    pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
+        let lang = normalize(language);
+        let mut tess = tesseract::Tesseract::new(None, Some(&lang)).map_err(|_| Failure::Engine)?;
+        tess.set_image_from_mem(png).map_err(|_| Failure::Engine)?;
+        let text = tess.get_text().map_err(|_| Failure::Engine)?;
+        Ok(OcrResult {
+            text,
+            confidence: None,
+        })
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub struct WinRtEngine;
+#[cfg(target_os = "windows")]
+impl OcrEngine for WinRtEngine {
+    fn recognize(&self, png: &[u8], language: &str) -> Result<OcrResult, Failure> {
+        windows::recognize(png, language)
+    }
+    fn confidence_threshold(&self) -> Option<f64> {
+        // Windows.Media.Ocr reports per-word confidence in 0..1, same scale as
+        // Apple Vision; keep the same 0.5 gate.
+        Some(VISION_MIN_CONFIDENCE)
+    }
+}
+
+#[cfg(target_os = "windows")]
+mod windows {
+    use super::*;
+    use windows::{
+        Globalization::Language,
+        Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat, SoftwareBitmap},
+        Media::Ocr::OcrEngine,
+        Storage::Streams::{DataWriter, InMemoryRandomAccessStream},
+    };
+
+    pub fn languages() -> Result<Vec<String>, Failure> {
+        let engine = OcrEngine::try_create_from_user_profile_languages()
+            .or_else(|_| OcrEngine::try_create_from_user_profile_languages())
+            .map_err(|_| Failure::Engine)?;
+        let languages = engine
+            .available_recognizer_languages()
+            .map_err(|_| Failure::Engine)?;
+        let mut out = Vec::new();
+        for i in 0..languages.Size().map_err(|_| Failure::Engine)? {
+            let lang = languages.GetAt(i).map_err(|_| Failure::Engine)?;
+            out.push(lang.LanguageTag().map_err(|_| Failure::Engine)?.to_string());
+        }
+        Ok(out)
+    }
+
+    /// Decode a PNG into an RGBA8 SoftwareBitmap that Windows.Media.Ocr accepts.
+    fn software_bitmap(png: &[u8]) -> Result<SoftwareBitmap, Failure> {
+        let stream = InMemoryRandomAccessStream::new().map_err(|_| Failure::Engine)?;
+        let writer = DataWriter::new(&stream).map_err(|_| Failure::Engine)?;
+        writer.WriteBytes(png).map_err(|_| Failure::Engine)?;
+        writer
+            .StoreAsync()
+            .map_err(|_| Failure::Engine)?
+            .get()
+            .map_err(|_| Failure::Engine)?;
+        writer
+            .FlushAsync()
+            .map_err(|_| Failure::Engine)?
+            .get()
+            .map_err(|_| Failure::Engine)?;
+        writer.DetachStream().map_err(|_| Failure::Engine)?;
+        stream.Seek(0).map_err(|_| Failure::Engine)?;
+        let decoder = BitmapDecoder::CreateAsync(&stream)
+            .map_err(|_| Failure::Engine)?
+            .get()
+            .map_err(|_| Failure::Engine)?;
+        decoder
+            .GetSoftwareBitmapAsync(BitmapPixelFormat::Rgba8, BitmapAlphaMode::Ignore)
+            .map_err(|_| Failure::Engine)?
+            .get()
+            .map_err(|_| Failure::Engine)
+    }
+
+    pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
+        let bitmap = software_bitmap(png)?;
+        // Prefer the requested language; fall back to user-profile languages so
+        // a stale "en-US" config keeps working when the OS language differs.
+        let engine = Language::CreateLanguage(language)
+            .ok()
+            .and_then(|lang| OcrEngine::TryCreateFromLanguage(&lang).ok())
+            .or_else(|| OcrEngine::TryCreateFromUserProfileLanguages().ok())
+            .ok_or(Failure::Engine)?;
+        let result = engine
+            .RecognizeAsync(&bitmap)
+            .map_err(|_| Failure::Engine)?
+            .get()
+            .map_err(|_| Failure::Engine)?;
+        let lines = result.Lines().map_err(|_| Failure::Engine)?;
+        let mut text = Vec::new();
+        let mut confidences = Vec::new();
+        for i in 0..lines.Size().map_err(|_| Failure::Engine)? {
+            let line = lines.GetAt(i).map_err(|_| Failure::Engine)?;
+            if let Ok(t) = line.Text() {
+                let t = t.to_string();
+                if !t.trim().is_empty() {
+                    text.push(t);
+                }
+            }
+            if let Ok(words) = line.Words() {
+                for j in 0..words.Size().map_err(|_| Failure::Engine)? {
+                    if let Ok(w) = words.GetAt(j) {
+                        confidences.push(w.Confidence());
+                    }
+                }
+            }
+        }
+        let confidence = (!confidences.is_empty())
+            .then(|| confidences.iter().sum::<f64>() / confidences.len() as f64);
+        Ok(OcrResult {
+            text: text.join("\n"),
+            confidence,
+        })
+    }
+}
+
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
     use super::*;

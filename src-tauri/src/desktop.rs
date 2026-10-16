@@ -198,8 +198,8 @@ fn refresh_menu(app: &tauri::AppHandle) {
         }
     ));
     let _ = state.engine_item.set_text(format!(
-        "Engine: macVision / {}{}",
-        config.language,
+        "Engine: {}{}",
+        engine_label(),
         if config_warning {
             " — SETTINGS REQUIRED"
         } else {
@@ -215,19 +215,38 @@ fn refresh_menu(app: &tauri::AppHandle) {
             } else {
                 "⚠ Screen Recording REQUIRED — Open Settings"
             }
+        } else if cfg!(target_os = "linux") {
+            "Capture: grim + slurp (Wayland)"
+        } else if cfg!(target_os = "windows") {
+            "Capture: WinRT picker"
         } else {
             "⚠ Capture unsupported on this platform"
         });
     if let Some(tray) = app.tray_by_id("clipocr") {
-        let _ = tray.set_tooltip(Some(if !cfg!(target_os = "macos") {
-            "ClipOCR — unsupported platform"
-        } else if !permission {
-            "ClipOCR — Screen Recording permission required"
-        } else if !active {
-            "ClipOCR — hotkey INACTIVE; use tray Capture"
-        } else {
-            "ClipOCR — on-device OCR"
-        }));
+        let _ = tray.set_tooltip(Some(
+            if cfg!(not(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))) {
+                "ClipOCR — unsupported platform"
+            } else if !permission && cfg!(target_os = "macos") {
+                "ClipOCR — Screen Recording permission required"
+            } else if !active {
+                "ClipOCR — hotkey INACTIVE; use tray Capture"
+            } else {
+                "ClipOCR — on-device OCR"
+            },
+        ));
+    }
+}
+fn engine_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "WinRT"
+    } else if cfg!(target_os = "linux") {
+        "Tesseract"
+    } else {
+        "macVision"
     }
 }
 fn sync_hotkey(app: &tauri::AppHandle, config: &Config) {
@@ -415,7 +434,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             let hotkey_item =
                 MenuItem::with_id(app, "hotkey", "Hotkey: INACTIVE", false, None::<&str>)?;
             let engine_item =
-                MenuItem::with_id(app, "engine", "Engine: macVision", false, None::<&str>)?;
+                MenuItem::with_id(app, "engine", "Engine: INACTIVE", false, None::<&str>)?;
             let permission_item = MenuItem::with_id(
                 app,
                 "permission",
@@ -442,8 +461,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             ])?;
             let pipeline = Pipeline::new(
                 Arc::new(capture::PlatformCapture::new(root.clone())),
-                engine::create(core::EngineId::MacVision)
-                    .unwrap_or_else(|_| Arc::new(UnsupportedEngine)),
+                engine::create(config.engine).unwrap_or_else(|_| Arc::new(UnsupportedEngine)),
                 Arc::new(DesktopClipboard(app.handle().clone())),
             );
             app.manage(AppState {
@@ -541,6 +559,11 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 let listener = ipc::bind(&root).map_err(|_| "Cannot bind private CLI socket")?;
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(ipc::serve(listener, Arc::new(AppRequest(app_handle))));
+            }
+            #[cfg(windows)]
+            {
+                let app_handle = app.handle().clone();
+                ipc::spawn_server(root.clone(), Arc::new(AppRequest(app_handle)));
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

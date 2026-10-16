@@ -53,7 +53,11 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libtesseract-dev \
+            libleptonica-dev \
+            tesseract-ocr \
+            tesseract-ocr-eng
 
       - name: Rust formatting check
         if: matrix.os == 'ubuntu-24.04'

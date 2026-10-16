@@ -150,6 +150,121 @@ pub fn client(root: &Path) -> Outcome {
     serde_json::from_slice(&bytes).unwrap_or_else(|_| fail())
 }
 
+#[cfg(windows)]
+mod named {
+    use super::*;
+    use std::io::{Read, Write};
+
+    pub fn pipe_name(root: &Path) -> String {
+        // Windows named pipes are global; derive a per-profile name so two
+        // users on one machine never collide. Hashing the private root gives a
+        // stable, guess-resistant suffix without exposing the username.
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        use std::hash::{Hash, Hasher};
+        root.hash(&mut hasher);
+        format!(r"\\.\pipe\clipocr-{:016x}", hasher.finish())
+    }
+
+    /// Resident (server) side: run a dedicated thread that creates a fresh
+    /// pipe instance per request, answers exactly one CLI invocation, then
+    /// rebinds. A per-server tokio runtime handles the async capture pipeline.
+    pub fn serve_blocking(root: PathBuf, handler: Arc<dyn RequestHandler>) -> Result<(), Failure> {
+        let name = pipe_name(&root);
+        loop {
+            let server = match tokio::net::windows::named_pipe::ServerOptions::new()
+                .first_pipe_instance(true)
+                .create(&name)
+            {
+                Ok(s) => s,
+                Err(_) => return Err(Failure::Unavailable),
+            };
+            // Answer one client, then loop to rebind for the next invocation.
+            let _ = respond_std(server, handler.clone());
+        }
+    }
+
+    fn respond_std(
+        mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+        handler: Arc<dyn RequestHandler>,
+    ) -> Outcome {
+        let mut request = Vec::new();
+        let read = pipe.read_to_end(&mut request);
+        let out = if read.is_ok() && request == REQUEST {
+            let rt = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(rt) => rt,
+                Err(_) => return Outcome::failed(Failure::Engine),
+            };
+            match rt.block_on(async move { handler.capture().await }) {
+                out => out,
+            }
+        } else {
+            Outcome::failed(Failure::Unavailable)
+        };
+        if let Ok(mut bytes) = serde_json::to_vec(&out) {
+            bytes.push(b'\n');
+            let _ = pipe.write_all(&bytes);
+        }
+        let _ = pipe.flush();
+        out
+    }
+
+    /// CLI side: connect to the resident (cold-starting it if needed), send the
+    /// request, and return the parsed terminal outcome without retrying.
+    pub fn client(root: &Path) -> Outcome {
+        let mut attempts = 0;
+        loop {
+            let mut pipe =
+                match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name(root)) {
+                    Ok(c) => c,
+                    Err(_) if attempts == 0 => {
+                        // Cold start: spawn the resident, then retry once.
+                        let _ = std::process::Command::new(std::env::current_exe())
+                            .stdin(std::process::Stdio::null())
+                            .stdout(std::process::Stdio::null())
+                            .stderr(std::process::Stdio::null())
+                            .spawn();
+                        attempts += 1;
+                        std::thread::sleep(Duration::from_millis(150));
+                        continue;
+                    }
+                    Err(_) => return Outcome::failed(Failure::Unavailable),
+                };
+            if pipe.write_all(REQUEST).is_err() {
+                return Outcome::failed(Failure::Unavailable);
+            }
+            let mut bytes = Vec::new();
+            if pipe.read_to_end(&mut bytes).is_err() {
+                return Outcome::failed(Failure::Unavailable);
+            }
+            return serde_json::from_slice(&bytes)
+                .unwrap_or_else(|_| Outcome::failed(Failure::Unavailable));
+        }
+    }
+}
+
+/// Windows: spawn the named-pipe server on a dedicated thread. Unix uses
+/// `bind`/`serve` (async, tokio-native); the pipe server needs its own thread
+/// because it may block a whole `read_to_end` per request.
+#[cfg(windows)]
+pub fn spawn_server(root: PathBuf, handler: Arc<dyn RequestHandler>) {
+    std::thread::Builder::new()
+        .name("clipocr-ipc".into())
+        .spawn(move || {
+            let _ = named::serve_blocking(root, handler);
+        })
+        .ok();
+}
+
+/// Windows CLI entry: connect (cold-starting the resident if needed), send the
+/// capture request, and return the parsed terminal outcome.
+#[cfg(windows)]
+pub fn named_client(root: &Path) -> Outcome {
+    named::client(root)
+}
+
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;

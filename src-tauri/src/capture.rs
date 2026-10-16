@@ -30,7 +30,22 @@ pub fn permission_granted() -> bool {
     {
         unsafe { CGPreflightScreenCaptureAccess() }
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // Wayland (wlroots/omarchy) does not gate screen capture behind a
+        // permission grant the way macOS TCC does: grim/slurp capture what the
+        // compositor shows. Report granted; the spawn itself fails loudly if
+        // grim/slurp are missing or the session is X11 (grim exits non-zero).
+        true
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // Windows Graphics Capture shows its own system picker (the consent
+        // UI). No separate permission gate exists, so report granted; failures
+        // surface as capture errors.
+        true
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
         false
     }
@@ -83,25 +98,175 @@ impl CaptureDevice for PlatformCapture {
                 capture_with_command(&dir, CAPTURE_DEADLINE, |path| {
                     let mut cmd = std::process::Command::new("/usr/sbin/screencapture");
                     cmd.args(["-i", "-x", "-t", "png"]).arg(path);
-                    cmd
+                    Ok(cmd)
                 })
             })
             .await
             .map_err(|_| CaptureError::Failed(Failure::Capture))?
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "linux")]
+        {
+            let root = self.root.clone();
+            tokio::task::spawn_blocking(move || {
+                let dir = crate::storage::capture_dir(&root).map_err(CaptureError::Failed)?;
+                capture_with_command(&dir, CAPTURE_DEADLINE, |path| {
+                    // slurp prints the selected region as "x,y WxH" on stdout.
+                    // grim -g captures exactly that region to the target path.
+                    let geometry = slurp_geometry()?;
+                    let mut cmd = std::process::Command::new("grim");
+                    cmd.args(["-g", &geometry, "-t", "png"]).arg(path);
+                    Ok::<std::process::Command, CaptureError>(cmd)
+                })
+            })
+            .await
+            .map_err(|_| CaptureError::Failed(Failure::Capture))?
+        }
+        #[cfg(target_os = "windows")]
+        {
+            #[cfg(target_os = "windows")]
+            use std::sync::mpsc;
+            #[cfg(target_os = "windows")]
+            use windows_capture::{
+                capture::GraphicsCaptureApiHandler,
+                frame::Frame,
+                graphics_capture_api::InternalCaptureControl,
+                graphics_capture_picker::GraphicsCapturePicker,
+                settings::{
+                    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
+                    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
+                },
+            };
+
+            // The system picker runs a message pump of its own; it is the
+            // user-facing analog of macOS `screencapture -i`. The item it
+            // returns becomes the capture source. This must run on a thread
+            // with a message pump; spawn_blocking gives us one.
+            tokio::task::spawn_blocking(move || {
+                let (tx, rx) = mpsc::channel::<Result<(u32, u32, Vec<u8>), Failure>>();
+                let picked = match GraphicsCapturePicker::pick_item() {
+                    Ok(Some(item)) => item,
+                    Ok(None) => return Err(CaptureError::Cancelled),
+                    Err(e) => {
+                        return Err(match e {
+                            windows_capture::graphics_capture_picker::Error::Canceled => {
+                                CaptureError::Cancelled
+                            }
+                            _ => CaptureError::Failed(Failure::Capture),
+                        });
+                    }
+                };
+                let settings = Settings::new(
+                    picked,
+                    CursorCaptureSettings::Default,
+                    DrawBorderSettings::Default,
+                    SecondaryWindowSettings::Default,
+                    MinimumUpdateIntervalSettings::Default,
+                    DirtyRegionSettings::Default,
+                    ColorFormat::Rgba8,
+                    tx,
+                );
+                // start_free_threaded returns a CaptureControl we can stop; the
+                // handler sends the first frame through the channel and stops.
+                struct FirstFrame {
+                    tx: mpsc::Sender<Result<(u32, u32, Vec<u8>), Failure>>,
+                }
+                impl GraphicsCaptureApiHandler for FirstFrame {
+                    type Flags = mpsc::Sender<Result<(u32, u32, Vec<u8>), Failure>>;
+                    type Error = Box<dyn std::error::Error + Send + Sync>;
+                    fn new(
+                        ctx: windows_capture::capture::Context<Self::Flags>,
+                    ) -> Result<Self, Self::Error> {
+                        Ok(FirstFrame { tx: ctx.flags })
+                    }
+                    fn on_frame_arrived(
+                        &mut self,
+                        frame: &mut Frame<'_>,
+                        capture_control: InternalCaptureControl,
+                    ) -> Result<(), Self::Error> {
+                        let mut buffer = frame.buffer()?;
+                        let width = buffer.width();
+                        let height = buffer.height();
+                        let mut scratch = Vec::new();
+                        let pixels = buffer.as_nopadding_buffer(&mut scratch).to_vec();
+                        let _ = self.tx.send(Ok((width, height, pixels)));
+                        capture_control.stop();
+                        Ok(())
+                    }
+                }
+                let _ = FirstFrame::start_free_threaded(settings);
+                match rx.recv_timeout(CAPTURE_DEADLINE) {
+                    Ok(Ok((w, h, rgba))) => {
+                        crate::geometry::rgba_to_png(w, h, &rgba).map_err(CaptureError::Failed)
+                    }
+                    Ok(Err(_)) => Err(CaptureError::Failed(Failure::Capture)),
+                    Err(_) => Err(CaptureError::Failed(Failure::Timeout)),
+                }
+            })
+            .await
+            .map_err(|_| CaptureError::Failed(Failure::Capture))?
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
         {
             Err(CaptureError::Failed(Failure::Unsupported))
         }
     }
 }
 
+/// Run `slurp` for interactive region selection on Wayland (wlroots). Prints
+/// the selected geometry as `x,y WxH` used by `grim -g`. A cancelled or empty
+/// selection maps to [`CaptureError::Cancelled`]; a slurp that is not present
+/// or exits abnormally maps to [`CaptureError::Failed`].
+#[cfg(target_os = "linux")]
+fn slurp_geometry() -> Result<String, CaptureError> {
+    use std::process::{Command, Stdio};
+    let mut child = Command::new("slurp")
+        .args(["-f", "%x,%y %wx%h"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+    let start = std::time::Instant::now();
+    // slurp is interactive; wait for it to finish but bound the wait.
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(_) => return Err(CaptureError::Failed(Failure::Capture)),
+            Ok(None) if start.elapsed() >= OVERLAY_SELECT_TIMEOUT => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(CaptureError::Failed(Failure::Timeout));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    let mut out = String::new();
+    use std::io::Read;
+    child
+        .stdout
+        .take()
+        .ok_or(CaptureError::Failed(Failure::Capture))?
+        .read_to_string(&mut out)
+        .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+    if !status.success() {
+        return Err(CaptureError::Cancelled);
+    }
+    let geometry = out.trim().to_owned();
+    if geometry.is_empty() || crate::geometry::parse_slurp_geometry(&geometry).is_none() {
+        return Err(CaptureError::Cancelled);
+    }
+    // Re-serialize through the canonical formatter so grim receives exactly the
+    // grammar it accepts, regardless of slurp's output quirks.
+    let rect = crate::geometry::parse_slurp_geometry(&geometry).expect("checked above");
+    Ok(crate::geometry::slurp_geometry_string(rect))
+}
+
 /// Synchronous child ownership is deliberate: Drop kills AND reaps before file
 /// cleanup, even on unwinding. A dropped Tokio handle alone cannot guarantee this.
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[cfg(unix)]
 struct ChildGuard(std::process::Child);
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[cfg(unix)]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -109,12 +274,12 @@ impl Drop for ChildGuard {
         let _ = self.0.wait();
     }
 }
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 #[cfg(unix)]
 fn capture_with_command(
     dir: &std::path::Path,
     deadline: Duration,
-    command: impl FnOnce(&std::path::Path) -> std::process::Command,
+    command: impl FnOnce(&std::path::Path) -> Result<std::process::Command, CaptureError>,
 ) -> Result<Vec<u8>, CaptureError> {
     use std::{
         fs::OpenOptions,
@@ -134,7 +299,13 @@ fn capture_with_command(
         .map_err(|_| CaptureError::Failed(Failure::Capture))?;
     drop(prepared);
     // Declare after cleanup so child Drop always runs first.
-    let mut cmd = command(&path);
+    let mut cmd = match command(&path) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            cleanup.remove().map_err(CaptureError::Failed)?;
+            return Err(e);
+        }
+    };
     let mut child = ChildGuard(
         cmd.stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -248,7 +419,7 @@ mod tests {
             let mut c = std::process::Command::new("/usr/bin/perl");
             c.arg("-e").arg("open(my $pid, '>', $ARGV[1]) or die; print $pid $$; close $pid; select(undef,undef,undef,0.3); open(my $out, '>', $ARGV[0]) or die; print $out 'late synthetic screenshot'; close $out;")
                 .arg(path).arg(&pid_file);
-            c
+            Ok(c)
         });
         assert!(matches!(
             result,
@@ -285,7 +456,7 @@ mod tests {
                 .arg("unlink $ARGV[0] or die; open(my $out, '>', $ARGV[0]) or die; print $out 'synthetic'; close $out or die; chmod 0644, $ARGV[0] or die; my @st = stat $ARGV[0]; die if $st[1] == $ARGV[1] || ($st[2] & 0777) != 0644;")
                 .arg(path)
                 .arg(inode.to_string());
-            cmd
+            Ok(cmd)
         });
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
         assert_eq!(original.unwrap().metadata().unwrap().len(), 0);
@@ -304,7 +475,7 @@ mod tests {
         let result = capture_with_command(&dir, Duration::from_secs(1), |path| {
             std::fs::remove_file(path).unwrap();
             std::os::unix::fs::symlink(&target, path).unwrap();
-            std::process::Command::new("/usr/bin/true")
+            Ok(std::process::Command::new("/usr/bin/true"))
         });
         assert!(matches!(
             result,
@@ -318,18 +489,18 @@ mod tests {
     fn spawn_cancel_read_failures_cleanup_and_read_then_unlink() {
         let t = tempfile::tempdir().unwrap();
         assert!(capture_with_command(t.path(), Duration::from_secs(1), |_| {
-            std::process::Command::new("/nonexistent-clipocr-test")
+            Ok(std::process::Command::new("/nonexistent-clipocr-test"))
         })
         .is_err());
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
         let out = capture_with_command(t.path(), Duration::from_secs(1), |_| {
-            std::process::Command::new("/usr/bin/false")
+            Ok(std::process::Command::new("/usr/bin/false"))
         });
         assert!(matches!(out, Err(CaptureError::Cancelled)));
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
         let bytes = capture_with_command(t.path(), Duration::from_secs(1), |p| {
             std::fs::write(p, b"synthetic bytes").unwrap();
-            std::process::Command::new("/usr/bin/true")
+            Ok(std::process::Command::new("/usr/bin/true"))
         })
         .unwrap();
         assert_eq!(bytes, b"synthetic bytes");
@@ -337,7 +508,7 @@ mod tests {
         assert!(capture_with_command(t.path(), Duration::from_secs(1), |p| {
             std::fs::remove_file(p).unwrap();
             std::os::unix::fs::symlink("/nonexistent", p).unwrap();
-            std::process::Command::new("/usr/bin/true")
+            Ok(std::process::Command::new("/usr/bin/true"))
         })
         .is_err());
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);

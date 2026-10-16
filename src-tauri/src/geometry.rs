@@ -180,15 +180,8 @@ pub fn capture_screen_region_png(
 /// capture path (WinRT frames arrive as raw RGBA8). Rejects a byte count that
 /// does not match `width * height * 4` and forces alpha to 255, mirroring
 /// [`capture_screen_region_png`].
-pub fn rgba_to_png(
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> Result<Vec<u8>, crate::core::Failure> {
-    if width == 0
-        || height == 0
-        || u64::from(width) * u64::from(height) > crate::core::MAX_PIXELS
-    {
+pub fn rgba_to_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, crate::core::Failure> {
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > crate::core::MAX_PIXELS {
         return Err(crate::core::Failure::Capture);
     }
     let expected = (u64::from(width) * u64::from(height) * 4) as usize;
@@ -583,10 +576,13 @@ mod tests {
         let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
         assert_eq!(decoded.dimensions(), (2, 1));
         assert_eq!(decoded.pixels().collect::<Vec<_>>()[0].0, [12, 34, 56, 255]);
-        assert_eq!(decoded.pixels().collect::<Vec<_>>()[1].0, [200, 201, 202, 255]);
+        assert_eq!(
+            decoded.pixels().collect::<Vec<_>>()[1].0,
+            [200, 201, 202, 255]
+        );
         // Wrong byte count for the declared dimensions is rejected.
         assert!(rgba_to_png(2, 1, &data[..4]).is_err());
         assert!(rgba_to_png(0, 1, &data).is_err());
         assert!(rgba_to_png(1, 0, &data).is_err());
     }
-    }
+}

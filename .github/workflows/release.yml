@@ -124,7 +124,11 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libtesseract-dev \
+            libleptonica-dev \
+            tesseract-ocr \
+            tesseract-ocr-eng
 
       - name: Rust formatting check
         run: cargo fmt --all -- --check
@@ -185,7 +189,11 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libtesseract-dev \
+            libleptonica-dev \
+            tesseract-ocr \
+            tesseract-ocr-eng
 
       # macOS universal binary (arm64 + x86_64), signed with Developer ID and
       # notarized. Tauri's notarization env: APPLE_API_KEY = the ASC Key ID
