@@ -33,7 +33,12 @@ if (section === 'settings') {
         launch_at_login: document.getElementById('login').checked
       }});
       render(view);
-    } catch (error) { status.textContent = typeof error === 'string' ? error : 'Could not save settings.'; }
+    } catch (error) {
+      // Tauri v2 rejects with an object ({ code, message }); surface the real
+      // reason instead of the generic fallback so save failures are diagnosable.
+      const message = error && (error.message || error.error) ? (error.message || error.error) : String(error);
+      status.textContent = typeof message === 'string' && message ? message : 'Could not save settings.';
+    }
     finally { button.disabled = false; }
   });
 }
