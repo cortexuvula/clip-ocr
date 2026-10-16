@@ -46,6 +46,18 @@ pub fn resolve_hotkey(s: &str) -> &str {
         s.trim()
     }
 }
+
+/// Platform label for display in Settings/tray: the stored token is
+/// `CmdOrCtrl+Alt+X` (the cross-platform registration form); users should see
+/// `Cmd+Alt+X` on macOS and `Ctrl+Alt+X` elsewhere.
+pub fn display_hotkey(s: &str) -> String {
+    let resolved = resolve_hotkey(s);
+    if cfg!(target_os = "macos") {
+        resolved.replace("CmdOrCtrl", "Cmd")
+    } else {
+        resolved.replace("CmdOrCtrl", "Ctrl")
+    }
+}
 pub fn validate_hotkey(s: &str) -> Result<(), String> {
     use std::str::FromStr;
     tauri_plugin_global_shortcut::Shortcut::from_str(resolve_hotkey(s))
@@ -125,6 +137,18 @@ mod tests {
         assert_eq!(resolve_hotkey(" "), DEFAULT_HOTKEY);
         assert_eq!(resolve_hotkey(" Ctrl+Shift+O "), "Ctrl+Shift+O");
         assert!(validate_hotkey("not a shortcut").is_err());
+    }
+    #[test]
+    fn hotkey_displays_platform_form() {
+        // The stored token is always CmdOrCtrl+Alt+X; the label must show the
+        // platform form (Cmd on macOS, Ctrl elsewhere).
+        let shown = display_hotkey(DEFAULT_HOTKEY);
+        if cfg!(target_os = "macos") {
+            assert_eq!(shown, "Cmd+Alt+X");
+        } else {
+            assert_eq!(shown, "Ctrl+Alt+X");
+        }
+        assert_eq!(display_hotkey(""), display_hotkey(DEFAULT_HOTKEY));
     }
     #[test]
     fn config_roundtrip_and_remote_override_rejection() {

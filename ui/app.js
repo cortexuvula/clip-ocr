@@ -10,10 +10,13 @@ if (section === 'settings') {
   function render(view) {
     document.getElementById('version').textContent = view.version;
     document.getElementById('hotkey').value = view.config.hotkey;
+    document.getElementById('hotkey').placeholder = view.hotkey_display;
+    document.getElementById('hotkey-label').textContent = `Global shortcut (${view.hotkey_display})`;
     document.getElementById('language').replaceChildren(...view.languages.map(language => {
       const option = document.createElement('option'); option.value = language; option.textContent = language; return option;
     }));
     document.getElementById('language').value = view.config.language;
+    document.getElementById('engine').value = view.config.engine;
     document.getElementById('collapse').checked = view.config.collapse_line_breaks;
     document.getElementById('login').checked = view.config.launch_at_login;
     status.textContent = view.warning || (view.hotkey_active ? 'Shortcut active.' : 'Shortcut INACTIVE — use tray Capture or choose a different shortcut.');

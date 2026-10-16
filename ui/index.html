@@ -5,8 +5,8 @@
   <h1>ClipOCR <small id="version"></small></h1>
   <p>Screen text → clipboard. On-device, no network, no history.</p>
   <form id="form">
-    <label>Global shortcut<input id="hotkey" autocomplete="off" required placeholder="CmdOrCtrl+Alt+O"></label>
-    <label>OCR engine<select id="engine"><option value="macVision">Apple Vision (on-device)</option></select></label>
+    <label id="hotkey-label" for="hotkey">Global shortcut<input id="hotkey" autocomplete="off" required placeholder="Ctrl+Alt+X"></label>
+    <label>OCR engine<select id="engine"><option value="macVision">Apple Vision (on-device)</option><option value="Tesseract">Tesseract (on-device)</option><option value="WinRT">Windows OCR (on-device)</option></select></label>
     <label>Recognition language<select id="language" required></select></label>
     <label class="check"><input type="checkbox" id="collapse"> Collapse line breaks</label>
     <label class="check"><input type="checkbox" id="login"> Launch at login</label>

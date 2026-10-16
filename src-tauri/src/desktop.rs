@@ -190,7 +190,7 @@ fn refresh_menu(app: &tauri::AppHandle) {
     let active = state.hotkey_active.load(Ordering::SeqCst);
     let _ = state.hotkey_item.set_text(format!(
         "Hotkey: {}{}",
-        config::resolve_hotkey(&config.hotkey),
+        config::display_hotkey(&config.hotkey),
         if active {
             ""
         } else {
@@ -278,6 +278,8 @@ fn open_settings(app: &tauri::AppHandle) {
 #[derive(serde::Serialize)]
 pub struct SettingsView {
     config: Config,
+    /// Platform-form shortcut label (Cmd+Alt+X on macOS, Ctrl+Alt+X elsewhere).
+    hotkey_display: String,
     languages: Vec<String>,
     hotkey_active: bool,
     warning: Option<String>,
@@ -291,12 +293,14 @@ fn load_settings(
     if window.label() != "settings" {
         return Err("Settings window required".into());
     }
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "Settings unavailable")?
+        .clone();
     Ok(SettingsView {
-        config: state
-            .config
-            .lock()
-            .map_err(|_| "Settings unavailable")?
-            .clone(),
+        hotkey_display: config::display_hotkey(&config.hotkey),
+        config,
         languages: state.languages.clone(),
         hotkey_active: state.hotkey_active.load(Ordering::SeqCst),
         warning: state
