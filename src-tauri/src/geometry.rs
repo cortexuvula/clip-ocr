@@ -44,6 +44,12 @@ fn rect_from_parts(x: &str, y: &str, w: &str, h: &str) -> Option<CaptureRect> {
     })
 }
 
+/// Render a `CaptureRect` in the `x,y WxH` form that `slurp` prints and `grim`
+/// accepts (`grim -g "x,y WxH"`). Round-trips through [`parse_slurp_geometry`].
+pub fn slurp_geometry_string(rect: CaptureRect) -> String {
+    format!("{},{} {}x{}", rect.x, rect.y, rect.width, rect.height)
+}
+
 /// Clamp `rect` to a `0..bounds_w` × `0..bounds_h` image, translating the
 /// rect into image-local coordinates (subtracting nothing — the caller passes
 /// image-relative input). Returns `None` when nothing of the rect survives
@@ -165,6 +171,37 @@ pub fn capture_screen_region_png(
     }
     let mut png = std::io::Cursor::new(Vec::new());
     image::DynamicImage::ImageRgba8(cropped)
+        .write_to(&mut png, image::ImageFormat::Png)
+        .map_err(|_| crate::core::Failure::Capture)?;
+    Ok(png.into_inner())
+}
+
+/// Encode a tightly-packed RGBA8 buffer as an opaque PNG. Used by the Windows
+/// capture path (WinRT frames arrive as raw RGBA8). Rejects a byte count that
+/// does not match `width * height * 4` and forces alpha to 255, mirroring
+/// [`capture_screen_region_png`].
+pub fn rgba_to_png(
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> Result<Vec<u8>, crate::core::Failure> {
+    if width == 0
+        || height == 0
+        || u64::from(width) * u64::from(height) > crate::core::MAX_PIXELS
+    {
+        return Err(crate::core::Failure::Capture);
+    }
+    let expected = (u64::from(width) * u64::from(height) * 4) as usize;
+    if rgba.len() != expected {
+        return Err(crate::core::Failure::Capture);
+    }
+    let mut image = image::RgbaImage::from_raw(width, height, rgba.to_vec())
+        .ok_or(crate::core::Failure::Capture)?;
+    for pixel in image.pixels_mut() {
+        pixel.0[3] = 255;
+    }
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::ImageRgba8(image)
         .write_to(&mut png, image::ImageFormat::Png)
         .map_err(|_| crate::core::Failure::Capture)?;
     Ok(png.into_inner())
@@ -517,4 +554,39 @@ mod tests {
         let (x, y) = indicator_position(0, 0, 1920, 0.0);
         assert!(x.is_finite() && y.is_finite());
     }
-}
+
+    #[test]
+    fn slurp_geometry_string_roundtrips_through_parser() {
+        for rect in [
+            CaptureRect {
+                x: 10,
+                y: 20,
+                width: 300,
+                height: 400,
+            },
+            CaptureRect {
+                x: -1920,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ] {
+            let s = slurp_geometry_string(rect);
+            assert_eq!(parse_slurp_geometry(&s), Some(rect), "roundtrip {s:?}");
+        }
+    }
+
+    #[test]
+    fn rgba_to_png_forces_opaque_alpha_and_rejects_bad_sizes() {
+        let data = vec![12u8, 34, 56, 0, 200, 201, 202, 0];
+        let png = rgba_to_png(2, 1, &data).unwrap();
+        let decoded = image::load_from_memory(&png).unwrap().to_rgba8();
+        assert_eq!(decoded.dimensions(), (2, 1));
+        assert_eq!(decoded.pixels().collect::<Vec<_>>()[0].0, [12, 34, 56, 255]);
+        assert_eq!(decoded.pixels().collect::<Vec<_>>()[1].0, [200, 201, 202, 255]);
+        // Wrong byte count for the declared dimensions is rejected.
+        assert!(rgba_to_png(2, 1, &data[..4]).is_err());
+        assert!(rgba_to_png(0, 1, &data).is_err());
+        assert!(rgba_to_png(1, 0, &data).is_err());
+    }
+    }
