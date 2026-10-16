@@ -169,29 +169,28 @@ mod named {
 
     /// Resident (server) side: run a dedicated thread that creates a fresh
     /// pipe instance per request, answers exactly one CLI invocation, then
-    /// rebinds. A per-server tokio runtime handles the async capture pipeline.
+    /// rebinds. The whole loop (including pipe creation, which needs a Tokio
+    /// reactor) runs inside a single current-thread runtime.
     pub fn serve_blocking(root: PathBuf, handler: Arc<dyn RequestHandler>) -> Result<(), Failure> {
-        let name = pipe_name(&root);
-        loop {
-            let server = match tokio::net::windows::named_pipe::ServerOptions::new()
-                .first_pipe_instance(true)
-                .create(&name)
-            {
-                Ok(s) => s,
-                Err(_) => return Err(Failure::Unavailable),
-            };
-            // Answer one client, then loop to rebind for the next invocation.
-            let rt = match tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-            {
-                Ok(rt) => rt,
-                Err(_) => return Err(Failure::Engine),
-            };
-            let _ = rt.block_on(respond_std(server, handler.clone()));
-        }
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|_| Failure::Engine)?;
+        rt.block_on(async move {
+            let name = pipe_name(&root);
+            loop {
+                let server = match tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&name)
+                {
+                    Ok(s) => s,
+                    Err(_) => return Err(Failure::Unavailable),
+                };
+                // Answer one client, then loop to rebind for the next invocation.
+                let _ = respond_std(server, handler.clone()).await;
+            }
+        })
     }
-
     async fn respond_std(
         mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
         handler: Arc<dyn RequestHandler>,
