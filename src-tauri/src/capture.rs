@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 use crate::core::InFlightGuard;
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", test))]
 use crate::core::MAX_BYTES;
 use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;

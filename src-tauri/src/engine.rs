@@ -179,8 +179,11 @@ mod linux {
 
     pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
         let lang = normalize(language);
-        let mut tess = tesseract::Tesseract::new(None, Some(&lang)).map_err(|_| Failure::Engine)?;
-        tess.set_image_from_mem(png).map_err(|_| Failure::Engine)?;
+        // tesseract's API is builder-style: set_image_from_mem consumes self.
+        let mut tess = tesseract::Tesseract::new(None, Some(&lang))
+            .map_err(|_| Failure::Engine)?
+            .set_image_from_mem(png)
+            .map_err(|_| Failure::Engine)?;
         let text = tess.get_text().map_err(|_| Failure::Engine)?;
         Ok(OcrResult {
             text,
@@ -214,10 +217,7 @@ mod winrt {
     };
 
     pub fn languages() -> Result<Vec<String>, Failure> {
-        let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| Failure::Engine)?;
-        let languages = engine
-            .AvailableRecognizerLanguages()
-            .map_err(|_| Failure::Engine)?;
+        let languages = OcrEngine::AvailableRecognizerLanguages().map_err(|_| Failure::Engine)?;
         let mut out = Vec::new();
         for i in 0..languages.Size().map_err(|_| Failure::Engine)? {
             let lang = languages.GetAt(i).map_err(|_| Failure::Engine)?;

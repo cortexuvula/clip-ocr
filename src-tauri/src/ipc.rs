@@ -179,25 +179,25 @@ mod named {
                 Err(_) => return Err(Failure::Unavailable),
             };
             // Answer one client, then loop to rebind for the next invocation.
-            let _ = respond_std(server, handler.clone());
-        }
-    }
-
-    fn respond_std(
-        mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
-        handler: Arc<dyn RequestHandler>,
-    ) -> Outcome {
-        let mut request = Vec::new();
-        let read = pipe.read_to_end(&mut request);
-        let out = if read.is_ok() && request == REQUEST {
             let rt = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
             {
                 Ok(rt) => rt,
-                Err(_) => return Outcome::failed(Failure::Engine),
+                Err(_) => return Err(Failure::Engine),
             };
-            rt.block_on(async move { handler.capture().await })
+            let _ = rt.block_on(respond_std(server, handler.clone()));
+        }
+    }
+
+    async fn respond_std(
+        mut pipe: tokio::net::windows::named_pipe::NamedPipeServer,
+        handler: Arc<dyn RequestHandler>,
+    ) -> Outcome {
+        let mut request = Vec::new();
+        let read = pipe.read_to_end(&mut request).await;
+        let out = if read.is_ok() && request == REQUEST {
+            handler.capture().await
         } else {
             Outcome::failed(Failure::Unavailable)
         };
@@ -239,13 +239,13 @@ mod named {
                     }
                     Err(_) => return Outcome::failed(Failure::Unavailable),
                 };
-                if pipe.write_all(REQUEST).is_err() {
+                if pipe.write_all(REQUEST).await.is_err() {
                     return Outcome::failed(Failure::Unavailable);
                 }
                 // Half-close the write side so the server's read_to_end returns.
                 let _ = pipe.shutdown().await;
                 let mut bytes = Vec::new();
-                if pipe.read_to_end(&mut bytes).is_err() {
+                if pipe.read_to_end(&mut bytes).await.is_err() {
                     return Outcome::failed(Failure::Unavailable);
                 }
                 return serde_json::from_slice(&bytes)
