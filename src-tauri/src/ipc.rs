@@ -2,6 +2,8 @@
 //! fire-and-forget callback cannot provide the CLI's terminal exit contract.
 use crate::core::{Failure, Outcome};
 use async_trait::async_trait;
+#[cfg(windows)]
+use std::path::PathBuf;
 use std::{path::Path, sync::Arc, time::Duration};
 pub const REQUEST: &[u8] = b"--capture-ocr\n";
 pub fn wants_capture(args: &[String]) -> bool {
