@@ -90,10 +90,10 @@ jobs:
         with:
           name: clipocr-${{ matrix.os }}
           path: |
-            src-tauri/target/debug/clipocr.exe
-            src-tauri/target/debug/clipocr
-            src-tauri/target/debug/bundle/**/*.msi
-            src-tauri/target/debug/bundle/**/*.exe
-            src-tauri/target/debug/bundle/**/*.AppImage
-            src-tauri/target/debug/bundle/**/*.deb
+            target/debug/clipocr.exe
+            target/debug/clipocr
+            target/debug/bundle/**/*.msi
+            target/debug/bundle/**/*.exe
+            target/debug/bundle/**/*.AppImage
+            target/debug/bundle/**/*.deb
           if-no-files-found: warn

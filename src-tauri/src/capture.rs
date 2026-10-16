@@ -1,6 +1,6 @@
 #[cfg(target_os = "macos")]
 use crate::core::InFlightGuard;
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+#[cfg(any(target_os = "macos", target_os = "linux", all(test, unix)))]
 use crate::core::MAX_BYTES;
 use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;
@@ -186,7 +186,7 @@ impl CaptureDevice for PlatformCapture {
                         frame: &mut Frame<'_>,
                         capture_control: InternalCaptureControl,
                     ) -> Result<(), Self::Error> {
-                        let mut buffer = frame.buffer()?;
+                        let buffer = frame.buffer()?;
                         let width = buffer.width();
                         let height = buffer.height();
                         let mut scratch = Vec::new();
