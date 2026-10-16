@@ -1,7 +1,7 @@
 use crate::core::EngineId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+O";
+pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+X";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
