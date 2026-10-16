@@ -153,7 +153,7 @@ pub fn client(root: &Path) -> Outcome {
 #[cfg(windows)]
 mod named {
     use super::*;
-    use std::io::{Read, Write};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     pub fn pipe_name(root: &Path) -> String {
         // Windows named pipes are global; derive a per-profile name so two
@@ -197,27 +197,34 @@ mod named {
                 Ok(rt) => rt,
                 Err(_) => return Outcome::failed(Failure::Engine),
             };
-            match rt.block_on(async move { handler.capture().await }) {
-                out => out,
-            }
+            rt.block_on(async move { handler.capture().await })
         } else {
             Outcome::failed(Failure::Unavailable)
         };
         if let Ok(mut bytes) = serde_json::to_vec(&out) {
             bytes.push(b'\n');
-            let _ = pipe.write_all(&bytes);
+            let _ = pipe.write_all(&bytes).await;
         }
-        let _ = pipe.flush();
+        let _ = pipe.flush().await;
         out
     }
 
     /// CLI side: connect to the resident (cold-starting it if needed), send the
     /// request, and return the parsed terminal outcome without retrying.
     pub fn client(root: &Path) -> Outcome {
-        let mut attempts = 0;
-        loop {
-            let mut pipe =
-                match tokio::net::windows::named_pipe::ClientOptions::new().open(pipe_name(root)) {
+        let rt = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(rt) => rt,
+            Err(_) => return Outcome::failed(Failure::Unavailable),
+        };
+        rt.block_on(async move {
+            let mut attempts = 0;
+            loop {
+                let mut pipe = match tokio::net::windows::named_pipe::ClientOptions::new()
+                    .open(pipe_name(root))
+                {
                     Ok(c) => c,
                     Err(_) if attempts == 0 => {
                         // Cold start: spawn the resident, then retry once.
@@ -227,21 +234,24 @@ mod named {
                             .stderr(std::process::Stdio::null())
                             .spawn();
                         attempts += 1;
-                        std::thread::sleep(Duration::from_millis(150));
+                        tokio::time::sleep(Duration::from_millis(150)).await;
                         continue;
                     }
                     Err(_) => return Outcome::failed(Failure::Unavailable),
                 };
-            if pipe.write_all(REQUEST).is_err() {
-                return Outcome::failed(Failure::Unavailable);
+                if pipe.write_all(REQUEST).is_err() {
+                    return Outcome::failed(Failure::Unavailable);
+                }
+                // Half-close the write side so the server's read_to_end returns.
+                let _ = pipe.shutdown().await;
+                let mut bytes = Vec::new();
+                if pipe.read_to_end(&mut bytes).is_err() {
+                    return Outcome::failed(Failure::Unavailable);
+                }
+                return serde_json::from_slice(&bytes)
+                    .unwrap_or_else(|_| Outcome::failed(Failure::Unavailable));
             }
-            let mut bytes = Vec::new();
-            if pipe.read_to_end(&mut bytes).is_err() {
-                return Outcome::failed(Failure::Unavailable);
-            }
-            return serde_json::from_slice(&bytes)
-                .unwrap_or_else(|_| Outcome::failed(Failure::Unavailable));
-        }
+        })
     }
 }
 

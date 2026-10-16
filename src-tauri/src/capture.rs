@@ -165,8 +165,11 @@ impl CaptureDevice for PlatformCapture {
                     ColorFormat::Rgba8,
                     tx,
                 );
-                // start_free_threaded returns a CaptureControl we can stop; the
-                // handler sends the first frame through the channel and stops.
+                // `start` (blocking) takes control of this spawn_blocking
+                // thread until the handler stops after the first frame; the
+                // handler sends the RGBA frame through the channel. `start`
+                // does not require the picked item to be Send (unlike
+                // start_free_threaded).
                 struct FirstFrame {
                     tx: mpsc::Sender<Result<(u32, u32, Vec<u8>), Failure>>,
                 }
@@ -193,7 +196,7 @@ impl CaptureDevice for PlatformCapture {
                         Ok(())
                     }
                 }
-                let _ = FirstFrame::start_free_threaded(settings);
+                let _ = FirstFrame::start(settings);
                 match rx.recv_timeout(CAPTURE_DEADLINE) {
                     Ok(Ok((w, h, rgba))) => {
                         crate::geometry::rgba_to_png(w, h, &rgba).map_err(CaptureError::Failed)

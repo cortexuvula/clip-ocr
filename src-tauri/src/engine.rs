@@ -1,8 +1,6 @@
 //! Only the native, local Vision engine ships in the macOS spike. No provider
 //! resolution, remote overrides, helpers or IPC image files exist here.
-#[cfg(target_os = "macos")]
-use crate::core::OcrResult;
-use crate::core::{EngineId, Failure, OcrEngine};
+use crate::core::{EngineId, Failure, OcrEngine, OcrResult};
 use std::sync::Arc;
 // Vision candidate confidence is 0..1, NOT comparable to Tesseract's scale.
 pub const VISION_MIN_CONFIDENCE: f64 = 0.5;
@@ -33,7 +31,7 @@ pub fn languages() -> Result<Vec<String>, Failure> {
     }
     #[cfg(target_os = "windows")]
     {
-        windows::languages()
+        winrt::languages()
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
@@ -196,31 +194,29 @@ pub struct WinRtEngine;
 #[cfg(target_os = "windows")]
 impl OcrEngine for WinRtEngine {
     fn recognize(&self, png: &[u8], language: &str) -> Result<OcrResult, Failure> {
-        windows::recognize(png, language)
+        winrt::recognize(png, language)
     }
     fn confidence_threshold(&self) -> Option<f64> {
-        // Windows.Media.Ocr reports per-word confidence in 0..1, same scale as
-        // Apple Vision; keep the same 0.5 gate.
-        Some(VISION_MIN_CONFIDENCE)
+        // This windows-rs binding does not surface per-word confidence, so gate
+        // only on emptiness (same as Tesseract), never on a fabricated value.
+        None
     }
 }
 
 #[cfg(target_os = "windows")]
-mod windows {
+mod winrt {
     use super::*;
     use windows::{
         Globalization::Language,
-        Graphics::Imaging::{BitmapAlphaMode, BitmapDecoder, BitmapPixelFormat, SoftwareBitmap},
+        Graphics::Imaging::{BitmapDecoder, SoftwareBitmap},
         Media::Ocr::OcrEngine,
         Storage::Streams::{DataWriter, InMemoryRandomAccessStream},
     };
 
     pub fn languages() -> Result<Vec<String>, Failure> {
-        let engine = OcrEngine::try_create_from_user_profile_languages()
-            .or_else(|_| OcrEngine::try_create_from_user_profile_languages())
-            .map_err(|_| Failure::Engine)?;
+        let engine = OcrEngine::TryCreateFromUserProfileLanguages().map_err(|_| Failure::Engine)?;
         let languages = engine
-            .available_recognizer_languages()
+            .AvailableRecognizerLanguages()
             .map_err(|_| Failure::Engine)?;
         let mut out = Vec::new();
         for i in 0..languages.Size().map_err(|_| Failure::Engine)? {
@@ -230,31 +226,30 @@ mod windows {
         Ok(out)
     }
 
-    /// Decode a PNG into an RGBA8 SoftwareBitmap that Windows.Media.Ocr accepts.
+    /// Decode a PNG into a SoftwareBitmap that Windows.Media.Ocr accepts.
     fn software_bitmap(png: &[u8]) -> Result<SoftwareBitmap, Failure> {
         let stream = InMemoryRandomAccessStream::new().map_err(|_| Failure::Engine)?;
-        let writer = DataWriter::new(&stream).map_err(|_| Failure::Engine)?;
+        let writer = DataWriter::CreateDataWriter(&stream).map_err(|_| Failure::Engine)?;
         writer.WriteBytes(png).map_err(|_| Failure::Engine)?;
         writer
             .StoreAsync()
             .map_err(|_| Failure::Engine)?
-            .get()
+            .join()
             .map_err(|_| Failure::Engine)?;
         writer
             .FlushAsync()
             .map_err(|_| Failure::Engine)?
-            .get()
+            .join()
             .map_err(|_| Failure::Engine)?;
-        writer.DetachStream().map_err(|_| Failure::Engine)?;
         stream.Seek(0).map_err(|_| Failure::Engine)?;
         let decoder = BitmapDecoder::CreateAsync(&stream)
             .map_err(|_| Failure::Engine)?
-            .get()
+            .join()
             .map_err(|_| Failure::Engine)?;
         decoder
-            .GetSoftwareBitmapAsync(BitmapPixelFormat::Rgba8, BitmapAlphaMode::Ignore)
+            .GetSoftwareBitmapAsync()
             .map_err(|_| Failure::Engine)?
-            .get()
+            .join()
             .map_err(|_| Failure::Engine)
     }
 
@@ -262,7 +257,7 @@ mod windows {
         let bitmap = software_bitmap(png)?;
         // Prefer the requested language; fall back to user-profile languages so
         // a stale "en-US" config keeps working when the OS language differs.
-        let engine = Language::CreateLanguage(language)
+        let engine = Language::CreateLanguage(&language.into())
             .ok()
             .and_then(|lang| OcrEngine::TryCreateFromLanguage(&lang).ok())
             .or_else(|| OcrEngine::TryCreateFromUserProfileLanguages().ok())
@@ -270,11 +265,10 @@ mod windows {
         let result = engine
             .RecognizeAsync(&bitmap)
             .map_err(|_| Failure::Engine)?
-            .get()
+            .join()
             .map_err(|_| Failure::Engine)?;
         let lines = result.Lines().map_err(|_| Failure::Engine)?;
         let mut text = Vec::new();
-        let mut confidences = Vec::new();
         for i in 0..lines.Size().map_err(|_| Failure::Engine)? {
             let line = lines.GetAt(i).map_err(|_| Failure::Engine)?;
             if let Ok(t) = line.Text() {
@@ -283,19 +277,10 @@ mod windows {
                     text.push(t);
                 }
             }
-            if let Ok(words) = line.Words() {
-                for j in 0..words.Size().map_err(|_| Failure::Engine)? {
-                    if let Ok(w) = words.GetAt(j) {
-                        confidences.push(w.Confidence());
-                    }
-                }
-            }
         }
-        let confidence = (!confidences.is_empty())
-            .then(|| confidences.iter().sum::<f64>() / confidences.len() as f64);
         Ok(OcrResult {
             text: text.join("\n"),
-            confidence,
+            confidence: None,
         })
     }
 }
