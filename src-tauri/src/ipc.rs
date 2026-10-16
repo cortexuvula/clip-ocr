@@ -230,7 +230,11 @@ mod named {
                     Ok(c) => c,
                     Err(_) if attempts == 0 => {
                         // Cold start: spawn the resident, then retry once.
-                        let _ = std::process::Command::new(std::env::current_exe())
+                        let exe = match std::env::current_exe() {
+                            Ok(exe) => exe,
+                            Err(_) => return Outcome::failed(Failure::Unavailable),
+                        };
+                        let _ = std::process::Command::new(exe)
                             .stdin(std::process::Stdio::null())
                             .stdout(std::process::Stdio::null())
                             .stderr(std::process::Stdio::null())
