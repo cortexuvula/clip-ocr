@@ -53,7 +53,11 @@ jobs:
             librsvg2-dev \
             patchelf \
             libssl-dev \
-            pkg-config
+            pkg-config \
+            libtesseract-dev \
+            libleptonica-dev \
+            tesseract-ocr \
+            tesseract-ocr-eng
 
       - name: Rust formatting check
         if: matrix.os == 'ubuntu-24.04'
@@ -78,3 +82,18 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           args: --debug
+
+      # Upload the built binary so cross-platform smoke tests can pull it
+      # without a local toolchain (e.g. room-6 has no Rust).
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: clipocr-${{ matrix.os }}
+          path: |
+            target/debug/clipocr.exe
+            target/debug/clipocr
+            target/debug/bundle/**/*.msi
+            target/debug/bundle/**/*.exe
+            target/debug/bundle/**/*.AppImage
+            target/debug/bundle/**/*.deb
+          if-no-files-found: warn

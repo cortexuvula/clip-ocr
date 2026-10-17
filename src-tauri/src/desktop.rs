@@ -188,18 +188,21 @@ fn refresh_menu(app: &tauri::AppHandle) {
     // Never hold a state mutex while calling a main-thread menu API: the main
     // thread can simultaneously be servicing a Settings command needing it.
     let active = state.hotkey_active.load(Ordering::SeqCst);
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
     let _ = state.hotkey_item.set_text(format!(
         "Hotkey: {}{}",
-        config::resolve_hotkey(&config.hotkey),
-        if active {
+        config::display_hotkey(&config.hotkey),
+        if wayland {
+            " (compositor bind)"
+        } else if active {
             ""
         } else {
             " — INACTIVE (use Capture)"
         }
     ));
     let _ = state.engine_item.set_text(format!(
-        "Engine: macVision / {}{}",
-        config.language,
+        "Engine: {}{}",
+        engine_label(),
         if config_warning {
             " — SETTINGS REQUIRED"
         } else {
@@ -215,27 +218,61 @@ fn refresh_menu(app: &tauri::AppHandle) {
             } else {
                 "⚠ Screen Recording REQUIRED — Open Settings"
             }
+        } else if cfg!(target_os = "linux") {
+            "Capture: grim + slurp (Wayland)"
+        } else if cfg!(target_os = "windows") {
+            "Capture: WinRT picker"
         } else {
             "⚠ Capture unsupported on this platform"
         });
     if let Some(tray) = app.tray_by_id("clipocr") {
-        let _ = tray.set_tooltip(Some(if !cfg!(target_os = "macos") {
-            "ClipOCR — unsupported platform"
-        } else if !permission {
-            "ClipOCR — Screen Recording permission required"
-        } else if !active {
-            "ClipOCR — hotkey INACTIVE; use tray Capture"
-        } else {
-            "ClipOCR — on-device OCR"
-        }));
+        let _ = tray.set_tooltip(Some(
+            if cfg!(not(any(
+                target_os = "macos",
+                target_os = "linux",
+                target_os = "windows"
+            ))) {
+                "ClipOCR — unsupported platform"
+            } else if !permission && cfg!(target_os = "macos") {
+                "ClipOCR — Screen Recording permission required"
+            } else if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                "ClipOCR — Wayland: bind Ctrl+Alt+X to clipocr --capture-ocr in your compositor"
+            } else if !active {
+                "ClipOCR — hotkey INACTIVE; use tray Capture"
+            } else {
+                "ClipOCR — on-device OCR"
+            },
+        ));
+    }
+}
+fn engine_label() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "WinRT"
+    } else if cfg!(target_os = "linux") {
+        "Tesseract"
+    } else {
+        "macVision"
     }
 }
 fn sync_hotkey(app: &tauri::AppHandle, config: &Config) {
     let shortcuts = app.global_shortcut();
-    let active = shortcuts.unregister_all().is_ok()
-        && shortcuts
-            .register(config::resolve_hotkey(&config.hotkey))
-            .is_ok();
+    let unreg_ok = shortcuts.unregister_all();
+    let reg = unreg_ok.and_then(|_| {
+        shortcuts.register(config::resolve_hotkey(&config.hotkey))
+    });
+    // On Wayland the X11 grab registers but never receives key events (the
+    // compositor routes keys to native Wayland clients), so it is effectively
+    // inactive: users bind `clipocr --capture-ocr` in their compositor instead.
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let active = reg.is_ok() && !wayland;
+    eprintln!(
+        "[clipocr] hotkey register {:?}: active={} wayland={} (DISPLAY={:?}, WAYLAND={:?})",
+        reg.as_ref().map(|_| ()).map_err(|e| format!("{:?}", e)),
+        active,
+        wayland,
+        std::env::var("DISPLAY").ok(),
+        std::env::var("WAYLAND_DISPLAY").ok()
+    );
     app.state::<AppState>()
         .hotkey_active
         .store(active, Ordering::SeqCst);
@@ -259,6 +296,8 @@ fn open_settings(app: &tauri::AppHandle) {
 #[derive(serde::Serialize)]
 pub struct SettingsView {
     config: Config,
+    /// Platform-form shortcut label (Cmd+Alt+X on macOS, Ctrl+Alt+X elsewhere).
+    hotkey_display: String,
     languages: Vec<String>,
     hotkey_active: bool,
     warning: Option<String>,
@@ -272,12 +311,14 @@ fn load_settings(
     if window.label() != "settings" {
         return Err("Settings window required".into());
     }
+    let config = state
+        .config
+        .lock()
+        .map_err(|_| "Settings unavailable")?
+        .clone();
     Ok(SettingsView {
-        config: state
-            .config
-            .lock()
-            .map_err(|_| "Settings unavailable")?
-            .clone(),
+        hotkey_display: config::display_hotkey(&config.hotkey),
+        config,
         languages: state.languages.clone(),
         hotkey_active: state.hotkey_active.load(Ordering::SeqCst),
         warning: state
@@ -299,7 +340,14 @@ async fn save_settings(
     if window.label() != "settings" {
         return Err("Settings window required".into());
     }
-    config.validate(&state.languages)?;
+    eprintln!(
+        "[clipocr] save_settings arrived: hotkey={:?} engine={:?} language={:?}",
+        config.hotkey, config.engine, config.language
+    );
+    config.validate(&state.languages).map_err(|e| {
+        eprintln!("[clipocr] save_settings validate failed: {e}");
+        e
+    })?;
     let save_guard = state.settings_save.lock().await;
     if state.pipeline.busy() {
         return Err("Wait for the current capture to finish before saving".into());
@@ -415,7 +463,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             let hotkey_item =
                 MenuItem::with_id(app, "hotkey", "Hotkey: INACTIVE", false, None::<&str>)?;
             let engine_item =
-                MenuItem::with_id(app, "engine", "Engine: macVision", false, None::<&str>)?;
+                MenuItem::with_id(app, "engine", "Engine: INACTIVE", false, None::<&str>)?;
             let permission_item = MenuItem::with_id(
                 app,
                 "permission",
@@ -442,8 +490,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             ])?;
             let pipeline = Pipeline::new(
                 Arc::new(capture::PlatformCapture::new(root.clone())),
-                engine::create(core::EngineId::MacVision)
-                    .unwrap_or_else(|_| Arc::new(UnsupportedEngine)),
+                engine::create(config.engine).unwrap_or_else(|_| Arc::new(UnsupportedEngine)),
                 Arc::new(DesktopClipboard(app.handle().clone())),
             );
             app.manage(AppState {
@@ -541,6 +588,11 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 let listener = ipc::bind(&root).map_err(|_| "Cannot bind private CLI socket")?;
                 let app_handle = app.handle().clone();
                 tauri::async_runtime::spawn(ipc::serve(listener, Arc::new(AppRequest(app_handle))));
+            }
+            #[cfg(windows)]
+            {
+                let app_handle = app.handle().clone();
+                ipc::spawn_server(root.clone(), Arc::new(AppRequest(app_handle)));
             }
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {

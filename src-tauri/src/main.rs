@@ -23,7 +23,9 @@ fn main() {
     if capture {
         #[cfg(unix)]
         finish(clipocr::ipc::client(&root));
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        finish(clipocr::ipc::named_client(&root));
+        #[cfg(not(any(unix, windows)))]
         finish(clipocr::core::Outcome::failed(
             clipocr::core::Failure::Unsupported,
         ));

@@ -1,5 +1,9 @@
 'use strict';
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+window.addEventListener('error', event => {
+  const s = document.getElementById('status');
+  if (s) s.textContent = `JS error: ${event.message}`;
+});
 const section = location.hash.slice(1);
 const allowed = ['settings', 'progress', 'selftest'];
 if (allowed.includes(section)) document.getElementById(section).hidden = false;
@@ -10,17 +14,22 @@ if (section === 'settings') {
   function render(view) {
     document.getElementById('version').textContent = view.version;
     document.getElementById('hotkey').value = view.config.hotkey;
+    document.getElementById('hotkey').placeholder = view.hotkey_display;
+    document.getElementById('hotkey-label').textContent = `Global shortcut (${view.hotkey_display})`;
     document.getElementById('language').replaceChildren(...view.languages.map(language => {
       const option = document.createElement('option'); option.value = language; option.textContent = language; return option;
     }));
     document.getElementById('language').value = view.config.language;
+    document.getElementById('engine').value = view.config.engine;
     document.getElementById('collapse').checked = view.config.collapse_line_breaks;
     document.getElementById('login').checked = view.config.launch_at_login;
+    status.className = '';
     status.textContent = view.warning || (view.hotkey_active ? 'Shortcut active.' : 'Shortcut INACTIVE — use tray Capture or choose a different shortcut.');
   }
   invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.'; });
   form.addEventListener('submit', async event => {
     event.preventDefault(); const button = form.querySelector('button'); button.disabled = true;
+    status.textContent = 'Saving…';
     try {
       const view = await invoke('save_settings', { config: {
         hotkey: document.getElementById('hotkey').value,
@@ -30,7 +39,17 @@ if (section === 'settings') {
         launch_at_login: document.getElementById('login').checked
       }});
       render(view);
-    } catch (error) { status.textContent = typeof error === 'string' ? error : 'Could not save settings.'; }
+      status.className = 'ok';
+      status.textContent = `✓ Settings saved.${view.warning ? ' ' + view.warning : ''}`;
+      status.scrollIntoView({ block: 'nearest' });
+    } catch (error) {
+      // Tauri v2 rejects with an object ({ code, message }); surface the real
+      // reason instead of the generic fallback so save failures are diagnosable.
+      const message = error && (error.message || error.error) ? (error.message || error.error) : String(error);
+      const ids = [...document.querySelectorAll('[id]')].map(e => e.id).join(',');
+      status.className = 'err';
+      status.textContent = `${typeof message === 'string' && message ? message : 'Could not save settings.'} [url=${location.href} ids=${ids}]`;
+    }
     finally { button.disabled = false; }
   });
 }
