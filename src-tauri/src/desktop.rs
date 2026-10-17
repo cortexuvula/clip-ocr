@@ -251,10 +251,18 @@ fn engine_label() -> &'static str {
 }
 fn sync_hotkey(app: &tauri::AppHandle, config: &Config) {
     let shortcuts = app.global_shortcut();
-    let active = shortcuts.unregister_all().is_ok()
-        && shortcuts
-            .register(config::resolve_hotkey(&config.hotkey))
-            .is_ok();
+    let unreg_ok = shortcuts.unregister_all();
+    let reg = unreg_ok.and_then(|_| {
+        shortcuts.register(config::resolve_hotkey(&config.hotkey))
+    });
+    let active = reg.is_ok();
+    eprintln!(
+        "[clipocr] hotkey register {:?}: active={} (DISPLAY={:?}, WAYLAND={:?})",
+        reg.as_ref().map(|_| ()).map_err(|e| format!("{:?}", e)),
+        active,
+        std::env::var("DISPLAY").ok(),
+        std::env::var("WAYLAND_DISPLAY").ok()
+    );
     app.state::<AppState>()
         .hotkey_active
         .store(active, Ordering::SeqCst);
