@@ -23,6 +23,7 @@ if (section === 'settings') {
     document.getElementById('engine').value = view.config.engine;
     document.getElementById('collapse').checked = view.config.collapse_line_breaks;
     document.getElementById('login').checked = view.config.launch_at_login;
+    status.className = '';
     status.textContent = view.warning || (view.hotkey_active ? 'Shortcut active.' : 'Shortcut INACTIVE — use tray Capture or choose a different shortcut.');
   }
   invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.'; });
@@ -38,11 +39,15 @@ if (section === 'settings') {
         launch_at_login: document.getElementById('login').checked
       }});
       render(view);
+      status.className = 'ok';
+      status.textContent = `✓ Settings saved.${view.warning ? ' ' + view.warning : ''}`;
+      status.scrollIntoView({ block: 'nearest' });
     } catch (error) {
       // Tauri v2 rejects with an object ({ code, message }); surface the real
       // reason instead of the generic fallback so save failures are diagnosable.
       const message = error && (error.message || error.error) ? (error.message || error.error) : String(error);
       const ids = [...document.querySelectorAll('[id]')].map(e => e.id).join(',');
+      status.className = 'err';
       status.textContent = `${typeof message === 'string' && message ? message : 'Could not save settings.'} [url=${location.href} ids=${ids}]`;
     }
     finally { button.disabled = false; }
