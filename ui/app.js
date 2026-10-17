@@ -1,5 +1,9 @@
 'use strict';
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+window.addEventListener('error', event => {
+  const s = document.getElementById('status');
+  if (s) s.textContent = `JS error: ${event.message}`;
+});
 const section = location.hash.slice(1);
 const allowed = ['settings', 'progress', 'selftest'];
 if (allowed.includes(section)) document.getElementById(section).hidden = false;
@@ -24,6 +28,7 @@ if (section === 'settings') {
   invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.'; });
   form.addEventListener('submit', async event => {
     event.preventDefault(); const button = form.querySelector('button'); button.disabled = true;
+    status.textContent = 'Saving…';
     try {
       const view = await invoke('save_settings', { config: {
         hotkey: document.getElementById('hotkey').value,

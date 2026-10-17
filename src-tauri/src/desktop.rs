@@ -340,7 +340,14 @@ async fn save_settings(
     if window.label() != "settings" {
         return Err("Settings window required".into());
     }
-    config.validate(&state.languages)?;
+    eprintln!(
+        "[clipocr] save_settings arrived: hotkey={:?} engine={:?} language={:?}",
+        config.hotkey, config.engine, config.language
+    );
+    config.validate(&state.languages).map_err(|e| {
+        eprintln!("[clipocr] save_settings validate failed: {e}");
+        e
+    })?;
     let save_guard = state.settings_save.lock().await;
     if state.pipeline.busy() {
         return Err("Wait for the current capture to finish before saving".into());
