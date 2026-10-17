@@ -188,10 +188,13 @@ fn refresh_menu(app: &tauri::AppHandle) {
     // Never hold a state mutex while calling a main-thread menu API: the main
     // thread can simultaneously be servicing a Settings command needing it.
     let active = state.hotkey_active.load(Ordering::SeqCst);
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
     let _ = state.hotkey_item.set_text(format!(
         "Hotkey: {}{}",
         config::display_hotkey(&config.hotkey),
-        if active {
+        if wayland {
+            " (compositor bind)"
+        } else if active {
             ""
         } else {
             " — INACTIVE (use Capture)"
@@ -232,6 +235,8 @@ fn refresh_menu(app: &tauri::AppHandle) {
                 "ClipOCR — unsupported platform"
             } else if !permission && cfg!(target_os = "macos") {
                 "ClipOCR — Screen Recording permission required"
+            } else if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+                "ClipOCR — Wayland: bind Ctrl+Alt+X to clipocr --capture-ocr in your compositor"
             } else if !active {
                 "ClipOCR — hotkey INACTIVE; use tray Capture"
             } else {
@@ -255,11 +260,16 @@ fn sync_hotkey(app: &tauri::AppHandle, config: &Config) {
     let reg = unreg_ok.and_then(|_| {
         shortcuts.register(config::resolve_hotkey(&config.hotkey))
     });
-    let active = reg.is_ok();
+    // On Wayland the X11 grab registers but never receives key events (the
+    // compositor routes keys to native Wayland clients), so it is effectively
+    // inactive: users bind `clipocr --capture-ocr` in their compositor instead.
+    let wayland = cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some();
+    let active = reg.is_ok() && !wayland;
     eprintln!(
-        "[clipocr] hotkey register {:?}: active={} (DISPLAY={:?}, WAYLAND={:?})",
+        "[clipocr] hotkey register {:?}: active={} wayland={} (DISPLAY={:?}, WAYLAND={:?})",
         reg.as_ref().map(|_| ()).map_err(|e| format!("{:?}", e)),
         active,
+        wayland,
         std::env::var("DISPLAY").ok(),
         std::env::var("WAYLAND_DISPLAY").ok()
     );

@@ -1,12 +1,20 @@
 # ClipOCR
 
-A standalone menu-bar utility: **CmdOrCtrl+Alt+O → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, analytics, or runtime network requests.
+A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, analytics, or runtime network requests.
 
 ## Status and platform scope
 
-This is the **macOS-first 0.1 spike** of the [rev-3 design](docs/superpowers/specs/2026-10-15-clip-ocr-design.md), not a claim of finished Linux/Windows support. macOS uses the system region picker and **in-process Apple Vision** through objc2 bindings; there is no Swift OCR executable or image IPC file. macOS 12+ is the configured deployment target; this build has been exercised only on the implementation machine, not an older-OS compatibility matrix.
+Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and never call the network:
 
-Linux and Windows capture/OCR/overlay devices explicitly return `failed(unsupported)` and the tray displays an unsupported-platform warning. They do not implement the flawed desktop-union/selection-center overlay from the lineage. Pure per-monitor mapping, visible-constraint geometry, union, crop/opaque-alpha encoding, and the trait boundaries are present for later implementations. Linux wlroots, X11 and WinRT/Tesseract packaging are not shipped in this cut. GNOME/KDE Wayland capture is not claimed.
+| Platform | Capture | OCR engine |
+|----------|---------|------------|
+| macOS | system region picker (`screencapture`) | Apple Vision, in-process via objc2 (no Swift helper, no image IPC file) |
+| Linux (wlroots/Wayland) | `slurp` + `grim` | Tesseract (`tesseract-rs`) |
+| Windows | WinRT `GraphicsCapturePicker` | `Windows.Media.Ocr` (WinRT) |
+
+macOS 12+ is the deployment target. Linux has been exercised on Hyprland/wlroots (Omarchy) and Windows on Windows 11.
+
+**Wayland hotkeys:** the global-shortcut backend is X11-only (`global-hotkey` 0.8), and X11 key grabs do not receive events while a native Wayland client has focus. On a Wayland session, bind the command in your compositor instead — the app reports the shortcut as a compositor bind in the tray. See [Linux (Wayland)](#linux-wayland).
 
 ## Build and run
 
@@ -24,7 +32,25 @@ open target/release/bundle/macos/ClipOCR.app
 
 For a fully cached build, add `--offline` to Cargo commands and use `CARGO_NET_OFFLINE=true cargo tauri build --bundles app`. The application bundle is `target/release/bundle/macos/ClipOCR.app`; the executable is `ClipOCR.app/Contents/MacOS/clipocr`. Installing the same signed bundle at a stable path (normally `/Applications/ClipOCR.app`) is recommended before granting permissions or enabling launch at login. Do not move it afterwards without rechecking those settings.
 
-The tray contains Capture, hotkey status (explicit **INACTIVE** on registration failure), engine/language, Screen Recording permission, Settings, About/version, and Quit. No normal window is created at startup. Settings and the OCR progress pill are created only as needed; closing the last such window does not terminate the resident. Quit during an active capture asks you to finish/Esc-cancel first so the child can be reaped and the temporary file removed.
+The tray contains Capture, hotkey status (explicit **INACTIVE** on registration failure, or **compositor bind** on Wayland), engine/language, capture backend, Settings, About/version, and Quit. No normal window is created at startup. Settings and the OCR progress pill are created only as needed; closing the last such window does not terminate the resident. Quit during an active capture asks you to finish/Esc-cancel first so the child can be reaped and the temporary file removed.
+
+### Linux (Wayland)
+
+Dependencies: `tesseract` with the language data you need (e.g. `tesseract-data-eng`), plus `grim` and `slurp` for wlroots compositors (Hyprland, Sway, River).
+
+The resident is started from `~/.config/autostart/clipocr.desktop`. Include `DISPLAY=:0` in `Exec=` so the X11-backed shortcut registration has a display, and keep the WebKit workarounds on NVIDIA/wlroots:
+
+```ini
+Exec=env DISPLAY=:0 WEBKIT_DISABLE_DMABUF_RENDERER=1 WEBKIT_DISABLE_COMPOSITING_MODE=1 /home/USER/.local/bin/clipocr
+```
+
+**Bind the hotkey in the compositor** — the in-app shortcut cannot fire on Wayland. Hyprland (`~/.config/hypr/bindings.lua` with Omarchy; use `bind = CTRL ALT, X, exec, …` in plain `hyprland.conf`):
+
+```lua
+o.bind("CTRL + ALT + X", "ClipOCR capture", "/home/USER/.local/bin/clipocr --capture-ocr")
+```
+
+Then `hyprctl reload` and verify the binding appears in `hyprctl binds`. Sway: `bindsym Ctrl+Alt+x exec clipocr --capture-ocr`. GNOME/KDE Wayland are not claimed (no region-picker path wired).
 
 ### Screen Recording permission
 
@@ -36,19 +62,19 @@ Allow ClipOCR in System Settings → Privacy & Security → Screen & System Audi
 
 ### Settings
 
-Settings are raw TOML at `~/Library/Application Support/ca.clipocr.desktop/config.toml` (the application data directory), not confy. Save validates the shortcut, shipped engine, and the runtime-enumerated Vision language list. A malformed configuration blocks capture until repaired in Settings, rather than silently accepting a remote provider. A shortcut conflict is nonfatal: Capture remains available in the tray, and the menu/tooltip/settings visibly report an inactive shortcut. Saving unregisters and re-registers idempotently. Launch-at-login uses `tauri-plugin-autostart` and should be enabled only from the installed bundle.
+Settings are raw TOML in the platform application data directory — `~/Library/Application Support/ca.clipocr.desktop/config.toml` (macOS) or `~/.local/share/ca.clipocr.desktop/config.toml` (Linux) — not confy. Save validates the shortcut, the engine shipped on this platform, and the runtime-enumerated language list (Vision languages on macOS, installed Tesseract languages on Linux). A malformed configuration blocks capture until repaired in Settings, rather than silently accepting a remote provider. A shortcut conflict is nonfatal: Capture remains available in the tray, and the menu/tooltip/settings visibly report an inactive shortcut. Saving unregisters and re-registers idempotently. Launch-at-login uses `tauri-plugin-autostart` and should be enabled only from the installed bundle.
 
 Default keys:
 
 ```toml
-hotkey = "CmdOrCtrl+Alt+O"
-engine = "macVision"
-language = "en-US"
+hotkey = "CmdOrCtrl+Alt+X"
+engine = "macVision"   # Tesseract on Linux, WinRT on Windows
+language = "en-US"     # "eng" on Linux
 collapse_line_breaks = false
 launch_at_login = false
 ```
 
-The engine type is an offline allowlist (`macVision`, `Tesseract`, `WinRT`); only `macVision` is implemented and selectable in this release. Unknown engine/provider fields and remote overrides are rejected, not routed through a configurable provider stack.
+The engine type is an offline allowlist (`macVision`, `Tesseract`, `WinRT`); only the engine shipped on the current platform is selectable (Apple Vision on macOS, Tesseract on Linux, WinRT on Windows). Unknown engine/provider fields and remote overrides are rejected, not routed through a configurable provider stack.
 
 ## CLI: terminal outcome, not request acceptance
 
