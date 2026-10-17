@@ -37,7 +37,8 @@ if (section === 'settings') {
       // Tauri v2 rejects with an object ({ code, message }); surface the real
       // reason instead of the generic fallback so save failures are diagnosable.
       const message = error && (error.message || error.error) ? (error.message || error.error) : String(error);
-      status.textContent = typeof message === 'string' && message ? message : 'Could not save settings.';
+      const ids = [...document.querySelectorAll('[id]')].map(e => e.id).join(',');
+      status.textContent = `${typeof message === 'string' && message ? message : 'Could not save settings.'} [url=${location.href} ids=${ids}]`;
     }
     finally { button.disabled = false; }
   });
