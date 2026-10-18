@@ -1,7 +1,7 @@
 use crate::core::EngineId;
 use serde::{Deserialize, Serialize};
 use std::path::Path;
-pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+O";
+pub const DEFAULT_HOTKEY: &str = "CmdOrCtrl+Alt+X";
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
@@ -11,12 +11,29 @@ pub struct Config {
     pub collapse_line_breaks: bool,
     pub launch_at_login: bool,
 }
+pub fn default_engine() -> EngineId {
+    if cfg!(target_os = "windows") {
+        EngineId::WinRt
+    } else if cfg!(target_os = "linux") {
+        EngineId::Tesseract
+    } else {
+        EngineId::MacVision
+    }
+}
+pub fn default_language() -> String {
+    if cfg!(target_os = "linux") {
+        // Tesseract tag; the engine also normalizes from macOS-style tags.
+        "eng".into()
+    } else {
+        "en-US".into()
+    }
+}
 impl Default for Config {
     fn default() -> Self {
         Self {
             hotkey: DEFAULT_HOTKEY.into(),
-            engine: EngineId::MacVision,
-            language: "en-US".into(),
+            engine: default_engine(),
+            language: default_language(),
             collapse_line_breaks: false,
             launch_at_login: false,
         }
@@ -29,6 +46,18 @@ pub fn resolve_hotkey(s: &str) -> &str {
         s.trim()
     }
 }
+
+/// Platform label for display in Settings/tray: the stored token is
+/// `CmdOrCtrl+Alt+X` (the cross-platform registration form); users should see
+/// `Cmd+Alt+X` on macOS and `Ctrl+Alt+X` elsewhere.
+pub fn display_hotkey(s: &str) -> String {
+    let resolved = resolve_hotkey(s);
+    if cfg!(target_os = "macos") {
+        resolved.replace("CmdOrCtrl", "Cmd")
+    } else {
+        resolved.replace("CmdOrCtrl", "Ctrl")
+    }
+}
 pub fn validate_hotkey(s: &str) -> Result<(), String> {
     use std::str::FromStr;
     tauri_plugin_global_shortcut::Shortcut::from_str(resolve_hotkey(s))
@@ -38,11 +67,16 @@ pub fn validate_hotkey(s: &str) -> Result<(), String> {
 impl Config {
     pub fn validate(&self, languages: &[String]) -> Result<(), String> {
         validate_hotkey(&self.hotkey)?;
-        if self.engine != EngineId::MacVision || !cfg!(target_os = "macos") {
+        let shipped = match self.engine {
+            EngineId::MacVision => cfg!(target_os = "macos"),
+            EngineId::Tesseract => cfg!(target_os = "linux"),
+            EngineId::WinRt => cfg!(target_os = "windows"),
+        };
+        if !shipped {
             return Err("Engine is not shipped on this platform".into());
         }
         if !languages.contains(&self.language) {
-            return Err("Language is not supported by this OS's Vision engine".into());
+            return Err("Language is not supported by this platform's OCR engine".into());
         }
         Ok(())
     }
@@ -103,6 +137,18 @@ mod tests {
         assert_eq!(resolve_hotkey(" "), DEFAULT_HOTKEY);
         assert_eq!(resolve_hotkey(" Ctrl+Shift+O "), "Ctrl+Shift+O");
         assert!(validate_hotkey("not a shortcut").is_err());
+    }
+    #[test]
+    fn hotkey_displays_platform_form() {
+        // The stored token is always CmdOrCtrl+Alt+X; the label must show the
+        // platform form (Cmd on macOS, Ctrl elsewhere).
+        let shown = display_hotkey(DEFAULT_HOTKEY);
+        if cfg!(target_os = "macos") {
+            assert_eq!(shown, "Cmd+Alt+X");
+        } else {
+            assert_eq!(shown, "Ctrl+Alt+X");
+        }
+        assert_eq!(display_hotkey(""), display_hotkey(DEFAULT_HOTKEY));
     }
     #[test]
     fn config_roundtrip_and_remote_override_rejection() {
