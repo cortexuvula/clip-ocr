@@ -505,22 +505,28 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 permission_item,
                 _instance_lock: lock,
             });
-            // Small generated monochrome template icon; no external assets needed.
+            // Small generated icon; no external assets needed.
             // A filled square with two text lines — reads clearly as "OCR" at
-            // menu-bar size (the old 1px hollow outline was nearly invisible).
+            // menu-bar size. Rendered in "hacker" green (#00FF41), so it is not
+            // a template image (macOS would otherwise force it monochrome).
+            const GREEN: [u8; 3] = [0x00, 0xFF, 0x41];
             let mut pixels = vec![0u8; 22 * 22 * 4];
             for y in 0..22 {
                 for x in 0..22 {
                     let border = !(2..20).contains(&x) || !(2..20).contains(&y);
                     let textline = (y == 8 || y == 13) && (4..18).contains(&x);
                     if border || textline {
-                        pixels[(y * 22 + x) * 4 + 3] = 255;
+                        let i = (y * 22 + x) * 4;
+                        pixels[i] = GREEN[0];
+                        pixels[i + 1] = GREEN[1];
+                        pixels[i + 2] = GREEN[2];
+                        pixels[i + 3] = 255;
                     }
                 }
             }
             TrayIconBuilder::with_id("clipocr")
                 .icon(tauri::image::Image::new_owned(pixels, 22, 22))
-                .icon_as_template(true)
+                .icon_as_template(false)
                 .menu(&menu)
                 .show_menu_on_left_click(true)
                 .on_menu_event(|app, event| {
