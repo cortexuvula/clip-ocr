@@ -257,9 +257,7 @@ fn engine_label() -> &'static str {
 fn sync_hotkey(app: &tauri::AppHandle, config: &Config) {
     let shortcuts = app.global_shortcut();
     let unreg_ok = shortcuts.unregister_all();
-    let reg = unreg_ok.and_then(|_| {
-        shortcuts.register(config::resolve_hotkey(&config.hotkey))
-    });
+    let reg = unreg_ok.and_then(|_| shortcuts.register(config::resolve_hotkey(&config.hotkey)));
     // On Wayland the X11 grab registers but never receives key events (the
     // compositor routes keys to native Wayland clients), so it is effectively
     // inactive: users bind `clipocr --capture-ocr` in their compositor instead.
