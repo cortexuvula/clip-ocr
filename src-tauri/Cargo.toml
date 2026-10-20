@@ -22,6 +22,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"
 image = { version = "0.25", default-features = false, features = ["png"] }
 async-trait = "0.1"
 uuid = { version = "1", features = ["v4"] }
+# Update check only: smallest blocking HTTPS client, rustls (no native TLS,
+# no async runtime), MSRV-compatible with rust-version = "1.88".
+ureq = { version = "2.10", default-features = false, features = ["tls"] }
 dirs = "6"
 libc = "0.2"
 fs2 = "0.4"

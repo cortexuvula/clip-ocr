@@ -23,10 +23,42 @@ if (section === 'settings') {
     document.getElementById('engine').value = view.config.engine;
     document.getElementById('collapse').checked = view.config.collapse_line_breaks;
     document.getElementById('login').checked = view.config.launch_at_login;
+    document.getElementById('updates-auto').checked = view.config.update_checks;
+    const u = view.update || {};
+    const summary = document.getElementById('update-summary');
+    const review = document.getElementById('update-review');
+    const check = document.getElementById('update-check');
+    const last = u.last_checked ? `Last successful check: ${u.last_checked}.` : '';
+    if (u.state === 'off') {
+      summary.textContent = 'Automatic update checks are off. No update request is made unless you choose Check for updates.';
+    } else if (u.state === 'checking') {
+      summary.textContent = 'Checking…';
+    } else if (u.state === 'up_to_date') {
+      summary.textContent = `ClipOCR v${view.version} is up to date. Last checked: ${u.last_checked || 'Never'}.`;
+    } else if (u.state === 'available') {
+      summary.textContent = `ClipOCR v${u.latest} is available. Installed: v${view.version}.`;
+    } else if (u.state === 'failed') {
+      summary.textContent = `Could not check for updates: ${u.reason || 'Update service unavailable'}. ${last || 'Last successful check: Never.'}`;
+    } else {
+      summary.textContent = 'No update request has been made yet.';
+    }
+    const available = u.state === 'available';
+    review.hidden = !available;
+    check.hidden = available;
     status.className = '';
     status.textContent = view.warning || (view.hotkey_active ? 'Shortcut active.' : 'Shortcut INACTIVE — use tray Capture or choose a different shortcut.');
   }
   invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.'; });
+  document.getElementById('update-check').addEventListener('click', () => {
+    invoke('request_update_check').then(() => {
+      status.className = '';
+      status.textContent = 'Check requested — the tray menu shows the result.';
+      window.setTimeout(() => invoke('load_settings').then(render).catch(() => {}), 4000);
+    }).catch(() => { status.className = 'err'; status.textContent = 'Could not request a check.'; });
+  });
+  document.getElementById('update-review').addEventListener('click', () => {
+    invoke('open_update_page').catch(() => {});
+  });
   form.addEventListener('submit', async event => {
     event.preventDefault(); const button = form.querySelector('button'); button.disabled = true;
     status.textContent = 'Saving…';
@@ -36,7 +68,8 @@ if (section === 'settings') {
         engine: document.getElementById('engine').value,
         language: document.getElementById('language').value,
         collapse_line_breaks: document.getElementById('collapse').checked,
-        launch_at_login: document.getElementById('login').checked
+        launch_at_login: document.getElementById('login').checked,
+        update_checks: document.getElementById('updates-auto').checked
       }});
       render(view);
       status.className = 'ok';
