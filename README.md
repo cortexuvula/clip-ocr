@@ -52,6 +52,12 @@ o.bind("CTRL + ALT + X", "ClipOCR capture", "/home/USER/.local/bin/clipocr --cap
 
 Then `hyprctl reload` and verify the binding appears in `hyprctl binds`. Sway: `bindsym Ctrl+Alt+x exec clipocr --capture-ocr`. GNOME/KDE Wayland are not claimed (no region-picker path wired).
 
+### Windows
+
+Capture and OCR ship with Windows 11 (`GraphicsCapturePicker`, `Windows.Media.Ocr`); the only runtime prerequisite is the WebView2 runtime that Tauri already needs. Launch at login is registry-based (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and starts the resident directly, so the resident detaches its own console at startup. Without that, Windows would leave a console/Windows Terminal window open for the whole session because the binary is console-subsystem.
+
+The binary stays console-subsystem on purpose: `--capture-ocr` waits and returns its exit code to the calling shell. A console inherited from such a caller is never detached — only a console this process owns (the login-autostart launch) is. A brief flash of a terminal window at login is possible, since Windows creates the console before the process runs.
+
 ### Screen Recording permission
 
 Every capture checks `CGPreflightScreenCaptureAccess()` **before** invoking `screencapture`. A denied check yields `permission_denied`, not a wallpaper-only OCR result. The tray warns until permission is granted, refreshing periodically. Click its Screen Recording item to explicitly request access and open:
