@@ -130,6 +130,27 @@ pub trait UpdateTransport: Send + Sync {
     ) -> Result<HttpResponse, TransportError>;
 }
 
+/// The exact URL shape `release.yml` writes into `latest.json`
+/// (`releases/tag/v` + the validated tag). The open-browser path validates
+/// AGAIN, at the point of use, and only ever launches this shape.
+const TAG_URL_PREFIX: &str = "https://github.com/cortexuvula/clip-ocr/releases/tag/v";
+
+/// Is this exactly the canonical release-tag URL: the repo tag prefix
+/// followed by `[0-9A-Za-z.-]+` and nothing else? Rejects quotes, spaces,
+/// `&`, `|`, `%`, `;`, backslashes, `..` segments, query strings and
+/// fragments — so a crafted manifest can never put shell or URL
+/// metacharacters in front of the OS launcher.
+pub fn is_canonical_release_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix(TAG_URL_PREFIX) else {
+        return false;
+    };
+    !rest.is_empty()
+        && !rest.contains("..")
+        && rest
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+}
+
 /// Parsed-and-validated manifest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckOutcome {
@@ -326,7 +347,14 @@ struct ManagerInner {
     cadence: Cadence,
     /// Set by the tray action / Settings button; consumed by the next tick.
     pending_manual: bool,
+    /// When the last check STARTED. Re-arming a manual request inside
+    /// this window is ignored, so a webview tight loop becomes a trickle.
+    last_started: Option<Instant>,
 }
+
+/// A manual check request inside this window of the last started check is
+/// ignored (anti-spam for repeated UI requests).
+pub const MANUAL_REQUEST_WINDOW: Duration = Duration::from_secs(30);
 
 /// Resident-side manager. The check itself is single-flighted through the
 /// SAME [`InFlightGuard`] machinery the capture pipeline uses.
@@ -366,6 +394,7 @@ impl UpdateManager {
                     retry_after_override: None,
                 },
                 pending_manual: false,
+                last_started: None,
             }),
             check_flag: Arc::new(AtomicBool::new(false)),
             transport,
@@ -385,11 +414,16 @@ impl UpdateManager {
 
     /// User asked for a check (tray / Settings). The network request is
     /// still made only by the resident tick — never from the UI command.
+    /// Re-requests within [`MANUAL_REQUEST_WINDOW`] of the last started
+    /// check are ignored so a UI loop cannot hammer the endpoint.
     pub fn request_manual(&self) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .pending_manual = true;
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(t) = inner.last_started {
+            if t.elapsed() < MANUAL_REQUEST_WINDOW {
+                return; // a check just ran; ignore the re-arm
+            }
+        }
+        inner.pending_manual = true;
     }
 
     pub fn status(&self) -> UpdateStatus {
@@ -435,6 +469,7 @@ impl UpdateManager {
             return None; // one check in flight
         };
         inner.pending_manual = false;
+        inner.last_started = Some(now);
         inner.status = UpdateStatus::Checking;
         Some(CheckLease { _guard: guard })
     }
@@ -1028,13 +1063,38 @@ mod tests {
                 latest: CURRENT.into()
             }
         );
-        // The pending manual flag survives to the next idle tick.
-        let lease2 = m
-            .tick(Instant::now(), Duration::ZERO, false)
-            .expect("pending manual check runs after idle");
-        let t2_calls = t.calls.load(Ordering::SeqCst);
-        drop(lease2); // cancelled without running: guard released
-        assert_eq!(t.calls.load(Ordering::SeqCst), t2_calls);
+        // The in-window re-arm is now IGNORED (anti-spam, 30s window):
+        // no lease, no second request. The re-arm policy is covered in
+        // manager_manual_rearm_inside_window_is_ignored.
+        assert!(
+            m.tick(Instant::now(), Duration::ZERO, false).is_none(),
+            "in-window manual re-arm must be ignored"
+        );
+        assert_eq!(t.calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn manager_manual_rearm_inside_window_is_ignored() {
+        let t = FakeTransport::new(vec![
+            resp(200, ok_body(CURRENT, NOTES)),
+            resp(200, ok_body(CURRENT, NOTES)),
+        ]);
+        let m = UpdateManager::with_version(t.clone(), false, CURRENT);
+        m.request_manual();
+        let lease = m.tick(Instant::now(), Duration::ZERO, false).unwrap();
+        m.run_check(&lease, SystemTime::UNIX_EPOCH);
+        drop(lease);
+        assert_eq!(t.calls.load(Ordering::SeqCst), 1);
+        // A tight re-arm loop inside the window: requests are IGNORED (the
+        // flag never becomes pending, so no second network call happens).
+        for _ in 0..5 {
+            m.request_manual();
+            assert!(
+                m.tick(Instant::now(), Duration::ZERO, false).is_none(),
+                "no second check inside the manual window"
+            );
+        }
+        assert_eq!(t.calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]
@@ -1079,5 +1139,49 @@ mod tests {
         let t = UNIX_EPOCH + Duration::from_secs(1_782_624_000); // 2026-06-28? computed below
         let s = format_utc(t);
         assert!(s.ends_with("UTC") && s.len() == "YYYY-MM-DD HH:MM UTC".len());
+    }
+}
+
+#[cfg(test)]
+mod hostile_url_tests {
+    use super::*;
+
+    #[test]
+    fn canonical_release_url_rejects_hostile_inputs() {
+        // Exact shapes the launcher accepts: the tag URLs release.yml
+        // generates.
+        assert!(is_canonical_release_url(
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0"
+        ));
+        assert!(is_canonical_release_url(
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v1.2.3-rc.1"
+        ));
+        // Nothing hostile reaches the launch path: quotes (cmd metachars
+        // via `start`), ampersands, pipes, semicolons, percent-encoding,
+        // dot-dot segments, backslashes, spaces, queries, fragments, other
+        // hosts, and empty/degenerate tails are all rejected.
+        for hostile in [
+            r#"https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0\"&calc"#,
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0&calc",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0|calc",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0;calc",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0%00",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0%41",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v..",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0/../evil",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0\\evil",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v 0.4.0",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0?x=1",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v0.4.0#frag",
+            "https://evil.test/cortexuvula/clip-ocr/releases/tag/v0.4.0",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/",
+            "https://github.com/cortexuvula/clip-ocr/releases/tag/v#",
+            "",
+        ] {
+            assert!(
+                !is_canonical_release_url(hostile),
+                "{hostile:?} must never reach the launch path"
+            );
+        }
     }
 }

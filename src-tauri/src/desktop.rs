@@ -176,30 +176,36 @@ fn notify(out: &Outcome) {
         let _ = message;
     });
 }
-/// Open the canonical release page in the system browser (Rust side; the
-/// URL is re-validated before launch — only the exact repository host
-/// prefix is ever opened).
+/// Open the canonical release page in the system browser (Rust side).
+/// The URL is validated at the POINT OF USE against the exact shape
+/// release.yml generates (`is_canonical_release_url`): a crafted manifest
+/// must never put quotes or shell metacharacters in front of an OS
+/// launcher. Windows deliberately does NOT shell out through cmd
+/// (`std::process::Command` cannot use ShellExecute for a bare URL); the
+/// no-shell launcher is `explorer.exe <url>`, which opens the default
+/// browser via the shell URL association with plain CreateProcessW argv —
+/// no cmd parsing anywhere in the path.
 fn open_release_page(url: &str) {
-    let prefix = "https://github.com/cortexuvula/clip-ocr";
-    if !url
-        .strip_prefix(prefix)
-        .is_some_and(|r| r.is_empty() || r.starts_with('/'))
-    {
-        return;
+    if !update::is_canonical_release_url(url) {
+        return; // typed rejection: never open a non-canonical URL
     }
-    let _ = std::process::Command::new(if cfg!(target_os = "macos") {
-        "/usr/bin/open"
-    } else if cfg!(target_os = "windows") {
-        "cmd"
-    } else {
-        "xdg-open"
-    })
-    .args(if cfg!(target_os = "windows") {
-        vec!["/C", "start", "", url]
-    } else {
-        vec![url]
-    })
-    .spawn();
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(url);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = std::process::Command::new(if cfg!(target_os = "macos") {
+            "/usr/bin/open"
+        } else {
+            "xdg-open"
+        });
+        c.arg(url);
+        c
+    };
+    let _ = cmd.spawn();
 }
 
 /// Resident tick: run the update manager's cadence (deferred while a
@@ -530,9 +536,14 @@ fn open_update_page(
     if window.label() != "settings" {
         return Err("Settings window required".into());
     }
-    if let Some(url) = state.update.notes_url() {
-        open_release_page(&url);
+    let Some(url) = state.update.notes_url() else {
+        return Ok(());
+    };
+    if !update::is_canonical_release_url(&url) {
+        // Typed failure (fixed label — no URL contents in the reply).
+        return Err("Update link unavailable".into());
     }
+    open_release_page(&url);
     Ok(())
 }
 

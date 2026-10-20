@@ -1,6 +1,6 @@
 # ClipOCR
 
-A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, or analytics. Recognized text never leaves the device: the ONLY network request ClipOCR ever makes is the optional update check (see [Updates](#updates)), which contacts github.com and nothing else.
+A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, or analytics. Recognized text never leaves the device: the ONLY network request ClipOCR ever makes is the optional update check (see [Updates](#updates)), which contacts github.com and GitHub's release-asset hosts.
 
 ## Status and platform scope
 
