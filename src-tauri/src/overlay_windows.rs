@@ -713,10 +713,9 @@ fn pump_until_settled(shared: &Shared, msg: &mut MSG) {
             drained = true;
         }
         // SAFETY: read-only window-liveness query.
-        let any_alive = shared
-            .hwnds
-            .iter()
-            .any(|h| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(*h) }.as_bool());
+        let any_alive = shared.hwnds.iter().any(|h| {
+            unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(*h)) }.as_bool()
+        });
         if drained || any_alive {
             quiet_polls = 0;
         } else {
