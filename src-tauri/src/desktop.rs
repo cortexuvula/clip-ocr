@@ -221,7 +221,7 @@ fn refresh_menu(app: &tauri::AppHandle) {
         } else if cfg!(target_os = "linux") {
             "Capture: grim + slurp (Wayland)"
         } else if cfg!(target_os = "windows") {
-            "Capture: WinRT picker"
+            "Capture: crosshair region"
         } else {
             "⚠ Capture unsupported on this platform"
         });

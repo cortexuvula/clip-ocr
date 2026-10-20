@@ -150,6 +150,49 @@ pub fn constrained_drag(
     })
 }
 
+/// Map a desktop-coordinate selection (physical pixels, e.g. from a Win32
+/// overlay) to the monitor where it began, returning the monitor's index and
+/// the selection translated into monitor-LOCAL pixels for cropping.
+///
+/// Doctrine (see [`constrained_drag`]): the drag is constrained to its origin
+/// monitor, so a selection that is not FULLY inside a single monitor means a
+/// clamp failed upstream — reject it rather than silently truncating a
+/// cross-monitor crop. Zero-size selections are rejected the same way
+/// (a click without a drag is a cancel, not a capture).
+pub fn monitor_local_crop(
+    monitors: &[CaptureRect],
+    selection: CaptureRect,
+) -> Option<(usize, CaptureRect)> {
+    // Zero-size is a cancel (a click without a drag), not a capture.
+    if selection.width == 0 || selection.height == 0 {
+        return None;
+    }
+    let (idx, monitor) = monitors.iter().enumerate().find(|(_, m)| {
+        // Origin monitor = the monitor containing the selection's origin.
+        selection.x >= m.x
+            && selection.y >= m.y
+            && selection.x < m.x.saturating_add(m.width as i32)
+            && selection.y < m.y.saturating_add(m.height as i32)
+    })?;
+    let local = CaptureRect {
+        x: selection.x.checked_sub(monitor.x)?,
+        y: selection.y.checked_sub(monitor.y)?,
+        width: selection.width,
+        height: selection.height,
+    };
+    // Fully-inside check: any spill outside the origin monitor is a bug in
+    // the overlay's clamp — reject rather than truncate (crop would fail
+    // anyway; failing HERE keeps the error at the mapping seam with tests).
+    let inside = local.x >= 0
+        && local.y >= 0
+        && i64::from(local.x) + i64::from(local.width) <= i64::from(monitor.width)
+        && i64::from(local.y) + i64::from(local.height) <= i64::from(monitor.height);
+    if !inside {
+        return None;
+    }
+    Some((idx, local))
+}
+
 /// The image half of capture_screen_region_png, ready for future platform
 /// CaptureDevice implementations. Reject partial crops: never silently truncate a
 /// cross-monitor drag. Preserve the lineage's alpha-force and in-memory PNG.
@@ -511,6 +554,192 @@ mod tests {
                 width: 100,
                 height: 100
             })
+        );
+    }
+
+    #[test]
+    fn monitor_local_crop_translates_negative_origin_monitor() {
+        // Monitor left of primary at negative origin, mixed-DPI arrangement.
+        let monitors = [
+            CaptureRect {
+                x: -2560,
+                y: -200,
+                width: 2560,
+                height: 1440,
+            },
+            CaptureRect {
+                x: 0,
+                y: 0,
+                width: 1920,
+                height: 1080,
+            },
+        ];
+        // Selection fully inside the left monitor → index + local coords.
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: -2560,
+                    y: -180,
+                    width: 2560,
+                    height: 180,
+                }
+            ),
+            Some((
+                0,
+                CaptureRect {
+                    x: 0,
+                    y: 20,
+                    width: 2560,
+                    height: 180,
+                }
+            ))
+        );
+        // Selection in the right monitor maps to index 1, origin-relative.
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 10,
+                    y: 10,
+                    width: 500,
+                    height: 90,
+                }
+            ),
+            Some((
+                1,
+                CaptureRect {
+                    x: 10,
+                    y: 10,
+                    width: 500,
+                    height: 90,
+                }
+            ))
+        );
+    }
+
+    #[test]
+    fn monitor_local_crop_rejects_cross_monitor_spill() {
+        // A selection that hangs off its origin monitor means the overlay's
+        // clamp failed — reject, never truncate.
+        let monitors = [CaptureRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 1000,
+                    y: 0,
+                    width: 1000,
+                    height: 100,
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 0,
+                    y: 1000,
+                    width: 100,
+                    height: 200,
+                }
+            ),
+            None
+        );
+        // Origin in the gap / outside every monitor → None.
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 5000,
+                    y: 5000,
+                    width: 10,
+                    height: 10,
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn monitor_local_crop_rejects_zero_size_selection() {
+        // A click without a drag: zero-size is a cancel, not a crop.
+        let monitors = [CaptureRect {
+            x: 0,
+            y: 0,
+            width: 1920,
+            height: 1080,
+        }];
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 100,
+                    y: 100,
+                    width: 0,
+                    height: 50,
+                }
+            ),
+            None
+        );
+        assert_eq!(
+            monitor_local_crop(
+                &monitors,
+                CaptureRect {
+                    x: 100,
+                    y: 100,
+                    width: 50,
+                    height: 0,
+                }
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn drag_clamped_at_monitor_edge_crops_exactly_to_the_edge() {
+        // End-to-end mapping: a drag that runs past the monitor edge is
+        // clamped by constrained_drag, and the clamped selection maps to a
+        // local crop that reaches exactly to the monitor edge.
+        let monitor = CaptureRect {
+            x: -2560,
+            y: -200,
+            width: 2560,
+            height: 1440,
+        };
+        // Logical drag from inside to far past the right/bottom edge.
+        let clamped = constrained_drag(monitor, 2.0, (10.0, 10.0), (2000.0, 1000.0))
+            .expect("clamped drag survives");
+        assert_eq!(
+            clamped,
+            CaptureRect {
+                x: -2540,
+                y: -180,
+                width: 2540,
+                height: 1440 - 20,
+            }
+        );
+        let (idx, local) = monitor_local_crop(&[monitor], clamped).expect("maps cleanly");
+        assert_eq!(idx, 0);
+        assert_eq!(
+            local,
+            CaptureRect {
+                x: 20,
+                y: 20,
+                width: 2540,
+                height: 1420,
+            }
+        );
+        // A drag entirely outside the monitor clamps to nothing (cancel).
+        assert_eq!(
+            constrained_drag(monitor, 2.0, (-5.0, -5.0), (-1.0, -1.0)),
+            None
         );
     }
 

@@ -5,4 +5,6 @@ pub mod desktop;
 pub mod engine;
 pub mod geometry;
 pub mod ipc;
+#[cfg(target_os = "windows")]
+pub mod overlay_windows;
 pub mod storage;

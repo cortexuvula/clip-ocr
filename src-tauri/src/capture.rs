@@ -2,6 +2,8 @@
 use crate::core::InFlightGuard;
 #[cfg(any(target_os = "macos", target_os = "linux", all(test, unix)))]
 use crate::core::MAX_BYTES;
+#[cfg(target_os = "windows")]
+use crate::core::MAX_PIXELS;
 use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;
 #[cfg(target_os = "macos")]
@@ -40,9 +42,9 @@ pub fn permission_granted() -> bool {
     }
     #[cfg(target_os = "windows")]
     {
-        // Windows Graphics Capture shows its own system picker (the consent
-        // UI). No separate permission gate exists, so report granted; failures
-        // surface as capture errors.
+        // Windows region capture draws its own overlay (monitor capture
+        // needs no consent UI on 1903+). No separate permission gate
+        // exists, so report granted; failures surface as capture errors.
         true
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
@@ -126,37 +128,59 @@ impl CaptureDevice for PlatformCapture {
             #[cfg(target_os = "windows")]
             use std::sync::mpsc;
             #[cfg(target_os = "windows")]
+            use windows::Win32::Foundation::POINT;
+            #[cfg(target_os = "windows")]
+            use windows::Win32::Graphics::Gdi::{MonitorFromPoint, MONITOR_DEFAULTTONULL};
+            #[cfg(target_os = "windows")]
             use windows_capture::{
                 capture::GraphicsCaptureApiHandler,
                 frame::Frame,
                 graphics_capture_api::InternalCaptureControl,
-                graphics_capture_picker::GraphicsCapturePicker,
+                monitor::Monitor,
                 settings::{
                     ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
                     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
                 },
             };
 
-            // The system picker runs a message pump of its own; it is the
-            // user-facing analog of macOS `screencapture -i`. The item it
-            // returns becomes the capture source. This must run on a thread
-            // with a message pump; spawn_blocking gives us one.
+            // Region selection (Snipping-Tool style crosshair overlay, see
+            // overlay_windows.rs) replaces the WinRT window picker. The
+            // overlay pumps messages; spawn_blocking gives us a thread.
             tokio::task::spawn_blocking(move || {
-                let (tx, rx) = mpsc::channel::<Result<(u32, u32, Vec<u8>), Failure>>();
-                let picked = match GraphicsCapturePicker::pick_item() {
-                    Ok(Some(item)) => item,
+                let selector = crate::overlay_windows::Win32RegionSelector;
+                let selection = match selector.select_region() {
+                    Ok(Some(rect)) => rect,
+                    // Esc / right-click / click without drag.
                     Ok(None) => return Err(CaptureError::Cancelled),
-                    Err(e) => {
-                        return Err(match e {
-                            windows_capture::graphics_capture_picker::Error::Canceled => {
-                                CaptureError::Cancelled
-                            }
-                            _ => CaptureError::Failed(Failure::Capture),
-                        });
-                    }
+                    Err(Failure::Timeout) => return Err(CaptureError::Failed(Failure::Timeout)),
+                    Err(e) => return Err(CaptureError::Failed(e)),
                 };
+                // Map the desktop-coord selection to its origin monitor and
+                // a monitor-LOCAL crop rect (rejects cross-monitor spill).
+                let monitors =
+                    crate::overlay_windows::enumerate_monitors().map_err(CaptureError::Failed)?;
+                let rects: Vec<crate::geometry::CaptureRect> =
+                    monitors.iter().map(|(_, r)| *r).collect();
+                let local = crate::geometry::monitor_local_crop(&rects, selection)
+                    .ok_or(CaptureError::Failed(Failure::Capture))?
+                    .1;
+                // The monitor that owns the selection origin.
+                let hmon = unsafe {
+                    MonitorFromPoint(
+                        POINT {
+                            x: selection.x,
+                            y: selection.y,
+                        },
+                        MONITOR_DEFAULTTONULL,
+                    )
+                };
+                if hmon.is_invalid() {
+                    return Err(CaptureError::Failed(Failure::Capture));
+                }
+                let item = Monitor::from_raw_hmonitor(hmon.as_raw_hmonitor());
+                let (tx, rx) = mpsc::channel::<Result<(u32, u32, Vec<u8>), Failure>>();
                 let settings = Settings::new(
-                    picked,
+                    item,
                     CursorCaptureSettings::Default,
                     DrawBorderSettings::Default,
                     SecondaryWindowSettings::Default,
@@ -167,9 +191,7 @@ impl CaptureDevice for PlatformCapture {
                 );
                 // `start` (blocking) takes control of this spawn_blocking
                 // thread until the handler stops after the first frame; the
-                // handler sends the RGBA frame through the channel. `start`
-                // does not require the picked item to be Send (unlike
-                // start_free_threaded).
+                // handler sends the RGBA frame through the channel.
                 struct FirstFrame {
                     tx: mpsc::Sender<Result<(u32, u32, Vec<u8>), Failure>>,
                 }
@@ -199,7 +221,15 @@ impl CaptureDevice for PlatformCapture {
                 let _ = FirstFrame::start(settings);
                 match rx.recv_timeout(CAPTURE_DEADLINE) {
                     Ok(Ok((w, h, rgba))) => {
-                        crate::geometry::rgba_to_png(w, h, &rgba).map_err(CaptureError::Failed)
+                        // Whole-monitor frame; guard the size before the
+                        // image allocation, then crop the selected region.
+                        if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+                            return Err(CaptureError::Failed(Failure::Capture));
+                        }
+                        let img = image::RgbaImage::from_raw(w, h, rgba)
+                            .ok_or(CaptureError::Failed(Failure::Capture))?;
+                        crate::geometry::capture_screen_region_png(&img, local)
+                            .map_err(CaptureError::Failed)
                     }
                     Ok(Err(_)) => Err(CaptureError::Failed(Failure::Capture)),
                     Err(_) => Err(CaptureError::Failed(Failure::Timeout)),
