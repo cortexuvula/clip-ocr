@@ -115,7 +115,7 @@ impl Scratch {
         let mem_dc: HDC = unsafe { CreateCompatibleDC(Some(mon_dc)) };
         if mem_dc.is_invalid() {
             // SAFETY: DIB created above and nothing selected into any DC.
-            unsafe { DeleteObject(dib.into()) };
+            let _ = unsafe { DeleteObject(dib.into()) };
             return None;
         }
         // SAFETY: freshly created DC; selecting our DIB is safe.
@@ -218,7 +218,7 @@ unsafe extern "system" fn overlay_wndproc(
         WM_SETCURSOR => {
             // SAFETY: load-only cursor resource; a failed load falls back
             // to the default cursor rather than aborting the selection.
-            if let Ok(cross) = (unsafe { LoadCursorW(None, IDC_CROSS) }) {
+            if let Ok(cross) = unsafe { LoadCursorW(None, IDC_CROSS) } {
                 unsafe { SetCursor(Some(cross)) };
             }
             LRESULT(1)
@@ -248,7 +248,7 @@ unsafe extern "system" fn overlay_wndproc(
         WM_LBUTTONUP => {
             if let Some((idx, start)) = shared.drag.take() {
                 // SAFETY: paired with the SetCapture on button-down.
-                unsafe { ReleaseCapture() };
+                let _ = unsafe { ReleaseCapture() };
                 let mon = &shared.monitors[idx];
                 shared.done = Some(
                     match constrained_drag(mon.rect, mon.scale, start, shared.cur) {
@@ -560,7 +560,7 @@ impl Win32RegionSelector {
             // SAFETY: our window, this thread.
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut shared as *mut Shared as isize);
-                SetWindowPos(
+                let _ = SetWindowPos(
                     hwnd,
                     Some(HWND_TOPMOST),
                     0,
@@ -569,7 +569,7 @@ impl Win32RegionSelector {
                     0,
                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
                 );
-                ShowWindow(
+                let _ = ShowWindow(
                     hwnd,
                     windows::Win32::UI::WindowsAndMessaging::SW_SHOWNOACTIVATE,
                 );
@@ -581,7 +581,7 @@ impl Win32RegionSelector {
             shared.scratch.push(scratch);
         }
         // SAFETY: paired with GetDC above.
-        unsafe { ReleaseDC(None, screen_dc) };
+        let _ = unsafe { ReleaseDC(None, screen_dc) };
 
         // Initial dim frame on every overlay.
         for idx in 0..shared.hwnds.len() {
@@ -592,7 +592,7 @@ impl Win32RegionSelector {
         // cancels).
         if let Some(&first) = shared.hwnds.first() {
             // SAFETY: our window.
-            unsafe { SetForegroundWindow(first) };
+            let _ = unsafe { SetForegroundWindow(first) };
         }
 
         // Message pump, bounded by the deadline. MsgWait + Peek avoids both
