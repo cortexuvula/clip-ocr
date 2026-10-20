@@ -11,6 +11,40 @@ if (section === 'progress') document.body.classList.add('pill');
 if (section === 'settings') {
   const status = document.getElementById('status');
   const form = document.getElementById('form');
+  const saveButton = () => form.querySelector('button[type=submit]');
+
+  // Render ONLY the update region from a settings view: the read-only
+  // status line (result of the last ACTUAL check — never a projection of
+  // the unsaved checkbox) and the visibility of "Review update…".
+  // This must never write to any form control, the save-status element,
+  // focus, or selection — it is the refresh path used after a manual
+  // check, where a full re-render would wipe the user's unsaved edits.
+  function renderUpdateRegion(update, version) {
+    const u = update || {};
+    const line = document.getElementById('update-status');
+    const review = document.getElementById('update-review');
+    const last = u.last_checked ? `Last successful check: ${u.last_checked}.` : 'Last successful check: Never.';
+    if (u.state === 'checking') {
+      line.textContent = 'Checking for updates…';
+    } else if (u.state === 'up_to_date') {
+      line.textContent = `ClipOCR v${version} is up to date. Last checked: ${u.last_checked || 'Never'}.`;
+    } else if (u.state === 'available') {
+      line.textContent = `ClipOCR v${u.latest} is available. Installed: v${version}.`;
+    } else if (u.state === 'failed') {
+      line.textContent = `Could not check for updates: ${u.reason || 'Update service unavailable'}. ${last}`;
+    } else {
+      // off / not_checked / unknown: no check result to project.
+      line.textContent = 'No update check has been made yet.';
+    }
+    // "Check for updates now" STAYS visible even when an update is
+    // available — a control the user may be reaching for must not be
+    // displaced by an asynchronously appearing one. [hidden] display:none
+    // keeps "Review update…" out of the tab/focus order while hidden.
+    review.hidden = u.state !== 'available';
+  }
+
+  // Full render — ONLY at load and after a successful save (the drafts
+  // have just become the persisted values at that point).
   function render(view) {
     document.getElementById('version').textContent = view.version;
     document.getElementById('hotkey').value = view.config.hotkey;
@@ -24,43 +58,30 @@ if (section === 'settings') {
     document.getElementById('collapse').checked = view.config.collapse_line_breaks;
     document.getElementById('login').checked = view.config.launch_at_login;
     document.getElementById('updates-auto').checked = view.config.update_checks;
-    const u = view.update || {};
-    const summary = document.getElementById('update-summary');
-    const review = document.getElementById('update-review');
-    const check = document.getElementById('update-check');
-    const last = u.last_checked ? `Last successful check: ${u.last_checked}.` : '';
-    if (u.state === 'off') {
-      summary.textContent = 'Automatic update checks are off. No update request is made unless you choose Check for updates.';
-    } else if (u.state === 'checking') {
-      summary.textContent = 'Checking…';
-    } else if (u.state === 'up_to_date') {
-      summary.textContent = `ClipOCR v${view.version} is up to date. Last checked: ${u.last_checked || 'Never'}.`;
-    } else if (u.state === 'available') {
-      summary.textContent = `ClipOCR v${u.latest} is available. Installed: v${view.version}.`;
-    } else if (u.state === 'failed') {
-      summary.textContent = `Could not check for updates: ${u.reason || 'Update service unavailable'}. ${last || 'Last successful check: Never.'}`;
-    } else {
-      summary.textContent = 'No update request has been made yet.';
-    }
-    const available = u.state === 'available';
-    review.hidden = !available;
-    check.hidden = available;
+    renderUpdateRegion(view.update, view.version);
     status.className = '';
     status.textContent = view.warning || (view.hotkey_active ? 'Shortcut active.' : 'Shortcut INACTIVE — use tray Capture or choose a different shortcut.');
   }
-  invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.'; });
+  invoke('load_settings').then(render).catch(() => { status.textContent = 'Settings unavailable.' });
+
   document.getElementById('update-check').addEventListener('click', () => {
+    const line = document.getElementById('update-status');
     invoke('request_update_check').then(() => {
-      status.className = '';
-      status.textContent = 'Check requested — the tray menu shows the result.';
-      window.setTimeout(() => invoke('load_settings').then(render).catch(() => {}), 4000);
-    }).catch(() => { status.className = 'err'; status.textContent = 'Could not request a check.'; });
+      // Request ACCEPTED is not a result: show pending state here and poll
+      // the update region only — the form draft is untouched.
+      line.textContent = 'Checking for updates…';
+      const refresh = () => invoke('load_settings')
+        .then(view => renderUpdateRegion(view.update, view.version))
+        .catch(() => {});
+      window.setTimeout(refresh, 4000);
+      window.setTimeout(refresh, 12000);
+    }).catch(() => { line.textContent = 'Check could not be started.'; });
   });
   document.getElementById('update-review').addEventListener('click', () => {
     invoke('open_update_page').catch(() => {});
   });
   form.addEventListener('submit', async event => {
-    event.preventDefault(); const button = form.querySelector('button'); button.disabled = true;
+    event.preventDefault(); const button = saveButton(); button.disabled = true;
     status.textContent = 'Saving…';
     try {
       const view = await invoke('save_settings', { config: {
@@ -74,16 +95,18 @@ if (section === 'settings') {
       render(view);
       status.className = 'ok';
       status.textContent = `✓ Settings saved.${view.warning ? ' ' + view.warning : ''}`;
-      status.scrollIntoView({ block: 'nearest' });
     } catch (error) {
-      // Tauri v2 rejects with an object ({ code, message }); surface the real
-      // reason instead of the generic fallback so save failures are diagnosable.
-      const message = error && (error.message || error.error) ? (error.message || error.error) : String(error);
-      const ids = [...document.querySelectorAll('[id]')].map(e => e.id).join(',');
+      // Tauri v2 rejects with an object ({ code, message }); surface the
+      // real reason only — no internal ids or window URL. The user's
+      // edits stay in the form untouched.
+      const message = error && (error.message || error.error) ? (error.message || error.error) : '';
       status.className = 'err';
-      status.textContent = `${typeof message === 'string' && message ? message : 'Could not save settings.'} [url=${location.href} ids=${ids}]`;
+      status.textContent = `${typeof message === 'string' && message ? message : 'Could not save settings.'} Your changes have not been saved.`;
     }
-    finally { button.disabled = false; }
+    finally {
+      button.disabled = false;
+      button.focus();
+    }
   });
 }
 if (section === 'selftest') {
