@@ -10,6 +10,10 @@ pub struct Config {
     pub language: String,
     pub collapse_line_breaks: bool,
     pub launch_at_login: bool,
+    /// Opt-in automatic update checks (default OFF: no request is ever
+    /// made unless the user enables this or clicks Check for updates).
+    #[serde(default)]
+    pub update_checks: bool,
 }
 pub fn default_engine() -> EngineId {
     if cfg!(target_os = "windows") {
@@ -36,6 +40,7 @@ impl Default for Config {
             language: default_language(),
             collapse_line_breaks: false,
             launch_at_login: false,
+            update_checks: false,
         }
     }
 }
@@ -150,6 +155,48 @@ mod tests {
         }
         assert_eq!(display_hotkey(""), display_hotkey(DEFAULT_HOTKEY));
     }
+    #[test]
+    fn update_opt_in_defaults_off_and_fails_closed() {
+        // Existing configs (no update key) default to OFF.
+        let without_key: Config = toml::from_str(
+            "hotkey = \"CmdOrCtrl+Alt+X\"\nengine = \"Tesseract\"\nlanguage = \"eng\"\ncollapse_line_breaks = false\nlaunch_at_login = false",
+        )
+        .unwrap();
+        assert!(!without_key.update_checks);
+        // A malformed value is an INVALID config (strict TOML like every
+        // other field) — it can never silently opt in.
+        assert!(toml::from_str::<Config>(
+            "hotkey = \"CmdOrCtrl+Alt+X\"\nengine = \"Tesseract\"\nlanguage = \"eng\"\ncollapse_line_breaks = false\nlaunch_at_login = false\nupdate_checks = \"yes\""
+        )
+        .is_err());
+        // And a config that fails to load resolves to defaults: OFF.
+        assert!(!Config::default().update_checks);
+    }
+
+    #[test]
+    fn update_opt_in_roundtrips_atomically() {
+        let t = tempfile::tempdir().unwrap();
+        let opted_in = Config {
+            update_checks: true,
+            ..Config::default()
+        };
+        opted_in.save(t.path()).unwrap();
+        assert!(Config::load(t.path()).unwrap().update_checks);
+        // Saving false over the file that said true (atomic replace).
+        let opted_out = Config {
+            update_checks: false,
+            ..opted_in
+        };
+        opted_out.save(t.path()).unwrap();
+        assert!(!Config::load(t.path()).unwrap().update_checks);
+        // Exactly one config.toml exists (no stray temp files).
+        assert_eq!(
+            std::fs::read_dir(t.path()).unwrap().count(),
+            1,
+            "atomic save must leave exactly one config file"
+        );
+    }
+
     #[test]
     fn config_roundtrip_and_remote_override_rejection() {
         let t = tempfile::tempdir().unwrap();

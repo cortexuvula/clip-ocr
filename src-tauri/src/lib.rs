@@ -8,3 +8,4 @@ pub mod ipc;
 #[cfg(target_os = "windows")]
 pub mod overlay_windows;
 pub mod storage;
+pub mod update;

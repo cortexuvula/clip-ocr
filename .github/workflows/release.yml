@@ -93,6 +93,28 @@ jobs:
             });
             return data.id;
 
+      # Update-check manifest: written from the tag and uploaded with the
+      # other assets. The client (src-tauri/src/update.rs) fetches
+      # releases/latest/download/latest.json — a missing asset keeps
+      # failing CLOSED client-side (typed "check failed"), never crashes.
+      - name: Upload latest.json
+        env:
+          RELEASE_VERSION: ${{ steps.get_version.outputs.VERSION }}
+        uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8
+        with:
+          script: |
+            const tag = process.env.RELEASE_VERSION;
+            const version = tag.replace(/^v/, '');
+            const notes_url = `https://github.com/${context.repo.owner}/${context.repo.repo}/releases/tag/${tag}`;
+            await github.rest.repos.uploadReleaseAsset({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              release_id: ${{ steps.create-release.outputs.result }},
+              name: 'latest.json',
+              data: JSON.stringify({ version, notes_url }, null, 2) + "\n",
+              headers: { 'content-type': 'application/json' }
+            });
+
   # Tests/clippy/fmt must pass before the release is published. Publish
   # (draft:false) is gated on this job — a bad tag or broken build cannot
   # auto-ship to users.

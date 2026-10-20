@@ -3,7 +3,7 @@ use crate::{
     capture,
     config::{self, Config},
     core::{self, Clipboard, Failure, Feedback, Outcome, Pipeline, Progress, Status},
-    engine, ipc, storage,
+    engine, ipc, storage, update,
 };
 use std::{
     fs::File,
@@ -12,7 +12,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tauri::{
     menu::{Menu, MenuItem, PredefinedMenuItem},
@@ -33,6 +33,9 @@ pub struct AppState {
     hotkey_item: MenuItem<tauri::Wry>,
     engine_item: MenuItem<tauri::Wry>,
     permission_item: MenuItem<tauri::Wry>,
+    update_item: MenuItem<tauri::Wry>,
+    update_action: MenuItem<tauri::Wry>,
+    update: Arc<update::UpdateManager>,
     _instance_lock: File,
 }
 struct DesktopClipboard(tauri::AppHandle);
@@ -173,6 +176,62 @@ fn notify(out: &Outcome) {
         let _ = message;
     });
 }
+/// Open the canonical release page in the system browser (Rust side).
+/// The URL is validated at the POINT OF USE against the exact shape
+/// release.yml generates (`is_canonical_release_url`): a crafted manifest
+/// must never put quotes or shell metacharacters in front of an OS
+/// launcher. Windows deliberately does NOT shell out through cmd
+/// (`std::process::Command` cannot use ShellExecute for a bare URL); the
+/// no-shell launcher is `explorer.exe <url>`, which opens the default
+/// browser via the shell URL association with plain CreateProcessW argv —
+/// no cmd parsing anywhere in the path.
+fn open_release_page(url: &str) {
+    if !update::is_canonical_release_url(url) {
+        return; // typed rejection: never open a non-canonical URL
+    }
+    #[cfg(target_os = "windows")]
+    let mut cmd = {
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(url);
+        c
+    };
+    #[cfg(not(target_os = "windows"))]
+    let mut cmd = {
+        let mut c = std::process::Command::new(if cfg!(target_os = "macos") {
+            "/usr/bin/open"
+        } else {
+            "xdg-open"
+        });
+        c.arg(url);
+        c
+    };
+    let _ = cmd.spawn();
+}
+
+/// Resident tick: run the update manager's cadence (deferred while a
+/// capture/OCR lease is held), then refresh the tray. No network in the
+/// startup critical path — this only ever runs from the periodic loop.
+fn update_tick(app: &tauri::AppHandle) {
+    let state = app.state::<AppState>();
+    let manager = state.update.clone();
+    let busy = state.pipeline.busy();
+    if let Some(lease) = manager.tick(Instant::now(), update::current_jitter(), busy) {
+        let app = app.clone();
+        tauri::async_runtime::spawn(async move {
+            let manager = manager.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                manager.run_check(&lease, std::time::SystemTime::now());
+            })
+            .await
+            .ok();
+            refresh_menu(&app);
+        });
+    } else {
+        // Still refresh the row (e.g. Checking… finished elsewhere).
+        let _ = state.update_item.set_text(manager.status().tray_label());
+    }
+}
+
 fn refresh_menu(app: &tauri::AppHandle) {
     let state = app.state::<AppState>();
     let config = state
@@ -209,6 +268,14 @@ fn refresh_menu(app: &tauri::AppHandle) {
             ""
         }
     ));
+    // Update rows (ui-consultant contract). The action NEVER says
+    // "Install" — it opens the release page in a browser.
+    let update_status = state.update.status();
+    let _ = state.update_item.set_text(update_status.tray_label());
+    let _ = state.update_action.set_text(match &update_status {
+        update::UpdateStatus::Available { .. } => "Update ClipOCR…",
+        _ => "Check for updates…",
+    });
     let permission = capture::permission_granted();
     let _ = state
         .permission_item
@@ -226,23 +293,32 @@ fn refresh_menu(app: &tauri::AppHandle) {
             "⚠ Capture unsupported on this platform"
         });
     if let Some(tray) = app.tray_by_id("clipocr") {
-        let _ = tray.set_tooltip(Some(
-            if cfg!(not(any(
-                target_os = "macos",
-                target_os = "linux",
-                target_os = "windows"
-            ))) {
-                "ClipOCR — unsupported platform"
-            } else if !permission && cfg!(target_os = "macos") {
-                "ClipOCR — Screen Recording permission required"
-            } else if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
-                "ClipOCR — Wayland: bind Ctrl+Alt+X to clipocr --capture-ocr in your compositor"
-            } else if !active {
-                "ClipOCR — hotkey INACTIVE; use tray Capture"
+        let base = if cfg!(not(any(
+            target_os = "macos",
+            target_os = "linux",
+            target_os = "windows"
+        ))) {
+            "ClipOCR — unsupported platform"
+        } else if !permission && cfg!(target_os = "macos") {
+            "ClipOCR — Screen Recording permission required"
+        } else if cfg!(target_os = "linux") && std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            "ClipOCR — Wayland: bind Ctrl+Alt+X to clipocr --capture-ocr in your compositor"
+        } else if !active {
+            "ClipOCR — hotkey INACTIVE; use tray Capture"
+        } else {
+            "ClipOCR — on-device OCR"
+        };
+        // Update text only ever APPENDS in the no-warning branch; it
+        // never displaces a capture warning.
+        let tooltip =
+            if let (update::UpdateStatus::Available { latest }, "ClipOCR — on-device OCR") =
+                (&update_status, base)
+            {
+                format!("{base} — update v{latest} available")
             } else {
-                "ClipOCR — on-device OCR"
-            },
-        ));
+                base.to_owned()
+            };
+        let _ = tray.set_tooltip(Some(&tooltip));
     }
 }
 fn engine_label() -> &'static str {
@@ -300,6 +376,39 @@ pub struct SettingsView {
     hotkey_active: bool,
     warning: Option<String>,
     version: &'static str,
+    /// Passive update-check state for the Updates section (no network
+    /// happens through this view — the resident performs any request).
+    update: UpdateView,
+}
+
+#[derive(serde::Serialize, Clone)]
+pub struct UpdateView {
+    /// One of: off | not_checked | checking | up_to_date | available | failed.
+    pub state: String,
+    pub latest: Option<String>,
+    /// Fixed reason label (never a framework error string).
+    pub reason: Option<&'static str>,
+    pub last_checked: Option<String>,
+    pub notes_url: Option<String>,
+}
+
+fn update_view(manager: &update::UpdateManager) -> UpdateView {
+    use update::UpdateStatus as S;
+    let (state, latest, reason) = match manager.status() {
+        S::Off => ("off", None, None),
+        S::NotChecked => ("not_checked", None, None),
+        S::Checking => ("checking", None, None),
+        S::UpToDate { latest } => ("up_to_date", Some(latest), None),
+        S::Available { latest } => ("available", Some(latest), None),
+        S::Failed { reason } => ("failed", None, Some(reason.label())),
+    };
+    UpdateView {
+        state: state.to_owned(),
+        latest,
+        reason,
+        last_checked: manager.last_success(),
+        notes_url: manager.notes_url(),
+    }
 }
 #[tauri::command]
 fn load_settings(
@@ -325,6 +434,7 @@ fn load_settings(
             .map_err(|_| "Settings unavailable")?
             .clone(),
         version: env!("CARGO_PKG_VERSION"),
+        update: update_view(&state.update),
     })
 }
 #[tauri::command]
@@ -381,6 +491,8 @@ async fn save_settings(
             .map_err(|_| "Settings unavailable")? = None;
         state.config_blocked.store(false, Ordering::SeqCst);
     }
+    // Update opt-in follows the saved config (default OFF).
+    state.update.set_enabled(config.update_checks);
     // Main-thread APIs must never execute while holding the config mutex.
     sync_hotkey(&app, &config);
     refresh_menu(&app);
@@ -397,6 +509,42 @@ async fn selftest_capture(
     }
     // Keep the synthetic text window visible. A human selects ONLY that text.
     Ok(run_capture(&app).await)
+}
+
+/// Settings button "Check for updates": sets a REQUEST flag only. The
+/// network request is performed by the resident tick when idle — no
+/// network, transport, or update logic is exposed to the webview.
+#[tauri::command]
+fn request_update_check(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if window.label() != "settings" {
+        return Err("Settings window required".into());
+    }
+    state.update.request_manual();
+    Ok(())
+}
+
+/// Settings button "Review update…": opens the validated release page in
+/// the system browser. No download, no install.
+#[tauri::command]
+fn open_update_page(
+    window: tauri::WebviewWindow,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), String> {
+    if window.label() != "settings" {
+        return Err("Settings window required".into());
+    }
+    let Some(url) = state.update.notes_url() else {
+        return Ok(());
+    };
+    if !update::is_canonical_release_url(&url) {
+        // Typed failure (fixed label — no URL contents in the reply).
+        return Err("Update link unavailable".into());
+    }
+    open_release_page(&url);
+    Ok(())
 }
 
 pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Error>> {
@@ -422,7 +570,9 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
         .invoke_handler(tauri::generate_handler![
             load_settings,
             save_settings,
-            selftest_capture
+            selftest_capture,
+            request_update_check,
+            open_update_page
         ])
         .setup(move |app| {
             use fs2::FileExt;
@@ -469,12 +619,23 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 cfg!(target_os = "macos"),
                 None::<&str>,
             )?;
+            let update_item =
+                MenuItem::with_id(app, "updates", "Updates: Off", false, None::<&str>)?;
+            let update_action = MenuItem::with_id(
+                app,
+                "update_action",
+                "Check for updates…",
+                true,
+                None::<&str>,
+            )?;
             menu.append_items(&[
                 &capture_item,
                 &PredefinedMenuItem::separator(app)?,
                 &hotkey_item,
                 &engine_item,
                 &permission_item,
+                &update_item,
+                &update_action,
                 &MenuItem::with_id(app, "settings", "Open Settings…", true, None::<&str>)?,
                 &MenuItem::with_id(
                     app,
@@ -491,6 +652,10 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 engine::create(config.engine).unwrap_or_else(|_| Arc::new(UnsupportedEngine)),
                 Arc::new(DesktopClipboard(app.handle().clone())),
             );
+            let update_manager = Arc::new(update::UpdateManager::new(
+                Arc::new(update::UreqTransport),
+                config.update_checks,
+            ));
             app.manage(AppState {
                 pipeline,
                 config: Mutex::new(config.clone()),
@@ -503,6 +668,9 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                 hotkey_item,
                 engine_item,
                 permission_item,
+                update_item,
+                update_action,
+                update: update_manager,
                 _instance_lock: lock,
             });
             // Small generated icon; no external assets needed.
@@ -544,6 +712,20 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
                                         .arg(core::PERMISSION_LINK)
                                         .status();
                                 });
+                            }
+                        }
+                        "update_action" => {
+                            let state = app.state::<AppState>();
+                            if let update::UpdateStatus::Available { .. } = state.update.status() {
+                                if let Some(url) = state.update.notes_url() {
+                                    open_release_page(&url);
+                                }
+                            } else {
+                                // Flag only — the network request is made
+                                // by the resident tick when idle, never
+                                // from the menu callback itself.
+                                state.update.request_manual();
+                                update_tick(app);
                             }
                         }
                         "about" => {
@@ -602,6 +784,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             tauri::async_runtime::spawn(async move {
                 loop {
                     tokio::time::sleep(Duration::from_secs(5)).await;
+                    update_tick(&handle);
                     refresh_menu(&handle);
                 }
             });

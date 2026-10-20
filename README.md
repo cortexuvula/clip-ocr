@@ -1,10 +1,10 @@
 # ClipOCR
 
-A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, analytics, or runtime network requests.
+A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, or analytics. Recognized text never leaves the device: the ONLY network request ClipOCR ever makes is the optional update check (see [Updates](#updates)), which contacts github.com and GitHub's release-asset hosts.
 
 ## Status and platform scope
 
-Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and never call the network:
+Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and never call the network (the optional update check is not part of OCR and is off by default):
 
 | Platform | Capture | OCR engine |
 |----------|---------|------------|
@@ -15,6 +15,16 @@ Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and n
 macOS 12+ is the deployment target. Linux has been exercised on Hyprland/wlroots (Omarchy) and Windows on Windows 11.
 
 **Wayland hotkeys:** the global-shortcut backend is X11-only (`global-hotkey` 0.8), and X11 key grabs do not receive events while a native Wayland client has focus. On a Wayland session, bind the command in your compositor instead — the app reports the shortcut as a compositor bind in the tray. See [Linux (Wayland)](#linux-wayland).
+
+## Updates
+
+ClipOCR checks for updates only when YOU ask it to (tray → **Check for updates…**), or — only if you enable it in Settings — automatically at most once a day. It is a CHECK, not an updater: nothing is downloaded, installed, or restarted. When a newer version exists, ClipOCR shows it and, on your click, opens the GitHub release page in your browser.
+
+- Endpoint: `https://github.com/cortexuvula/clip-ocr/releases/latest/download/latest.json` (fixed; redirects are followed only within github.com and its release-asset CDN hosts, over HTTPS).
+- The request carries nothing but the GET — no version, platform, or install identifier. GitHub sees your IP address; that is unavoidable.
+- Automatic checks: opt-in in Settings (**Check automatically (daily)**), default OFF, at most once per 24h, never during a capture, with 6h/12h/24h backoff after failures. Turn it off at any time in Settings.
+- Every failure (offline, proxy/TLS, 404, rate limit, malformed manifest) is reported as a typed status — never as "up to date" — and never affects OCR.
+- The tray menu shows an `Updates:` status row; the action says `Check for updates…` and becomes `Update ClipOCR…` when a newer version is known (it opens the release page — ClipOCR never installs anything).
 
 ## Build and run
 
