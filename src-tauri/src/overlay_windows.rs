@@ -70,6 +70,7 @@ fn border_px(scale: f64) -> i32 {
 }
 
 /// One monitor's overlay inputs: physical rect, DPI scale, HMONITOR.
+#[derive(Clone, Copy)]
 struct MonEntry {
     hmon: HMONITOR,
     rect: CaptureRect,
@@ -381,8 +382,8 @@ fn draw_layer(scratch: &mut Scratch, scale: f64, sel: Option<(i32, i32, i32, i32
     // Live `W × H` readout box near the selection corner, kept on-monitor.
     let label = format!("{sw} × {sh}");
     let box_w = estimate_text_w(&label) + 16;
-    let bx = (sx + sw + 8).min(scratch.w - box_w - 4).max(4);
-    let by = (sy + sh + 8).min(scratch.h - READOUT_H - 4).max(4);
+    let bx = (sx + sw + 8).min(mon_w - box_w - 4).max(4);
+    let by = (sy + sh + 8).min(mon_h - READOUT_H - 4).max(4);
     let (bx0, bx1) = (
         bx.max(0) as usize,
         (bx + box_w).min(w as i32).max(0) as usize,
@@ -404,13 +405,13 @@ fn draw_layer(scratch: &mut Scratch, scale: f64, sel: Option<(i32, i32, i32, i32
     let wide: Vec<u16> = label.encode_utf16().collect();
     // SAFETY: DC is our scratch DC; the DIB is selected into it.
     unsafe {
-        let _ = SetBkMode(scratch.mem_dc, TRANSPARENT);
+        let _ = SetBkMode(dc, TRANSPARENT);
         // COLORREF is 0x00BBGGRR.
         let _ = SetTextColor(
-            scratch.mem_dc,
+            dc,
             COLORREF((ACCENT[2] as u32) << 16 | (ACCENT[1] as u32) << 8 | ACCENT[0] as u32),
         );
-        let _ = TextOutW(scratch.mem_dc, bx0 as i32 + 8, by0 as i32 + 4, &wide);
+        let _ = TextOutW(dc, bx0 as i32 + 8, by0 as i32 + 4, &wide);
     }
     for y in by0..by1 {
         for x in bx0..bx1 {
@@ -535,7 +536,8 @@ impl Win32RegionSelector {
         // One topmost layered tool window per monitor + its render scratch.
         // SAFETY: screen DC for DIB creation.
         let screen_dc = unsafe { GetDC(None) };
-        for mon in &shared.monitors {
+        for idx in 0..shared.monitors.len() {
+            let mon = shared.monitors[idx];
             // SAFETY: class registered above; ex-style/tool/topmost keeps
             // the overlay off the taskbar and above normal windows.
             let hwnd = unsafe {
