@@ -177,7 +177,7 @@ impl CaptureDevice for PlatformCapture {
                 if hmon.is_invalid() {
                     return Err(CaptureError::Failed(Failure::Capture));
                 }
-                let item = Monitor::from_raw_hmonitor(hmon.as_raw_hmonitor());
+                let item = Monitor::from_raw_hmonitor(hmon.0);
                 let (tx, rx) = mpsc::channel::<Result<(u32, u32, Vec<u8>), Failure>>();
                 let settings = Settings::new(
                     item,

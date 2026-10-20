@@ -31,23 +31,23 @@ use windows::Win32::Foundation::{
     COLORREF, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, GetMonitorInfoW,
-    InvalidateRect, MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
-    UpdateLayeredWindow, AC_SRC_ALPHA, AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HBITMAP, HDC, HGDIOBJ, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-    MONITOR_DEFAULTTONULL, TRANSPARENT, ULW_ALPHA,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, InvalidateRect,
+    MonitorFromWindow, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW, AC_SRC_ALPHA,
+    AC_SRC_OVER, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, BLENDFUNCTION, DIB_RGB_COLORS, HBITMAP, HDC,
+    HGDIOBJ, HMONITOR, MONITOR_DEFAULTTONEAREST, TRANSPARENT,
 };
-use windows::Win32::UI::Hidpi::{
+use windows::Win32::UI::HiDpi::{
     GetDpiForMonitor, SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
     MDT_EFFECTIVE_DPI,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetWindowLongPtrW,
-    LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, RegisterClassW, ReleaseCapture,
-    SetCapture, SetCursor, SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    TranslateMessage, BLENDFUNCTION, GWLP_USERDATA, HMENU, HWND_TOPMOST, IDC_CROSS, MSG,
-    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
-    WM_KEYDOWN, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
+    LoadCursorW, MsgWaitForMultipleObjectsEx, PeekMessageW, RegisterClassW, SetCursor,
+    SetForegroundWindow, SetWindowLongPtrW, SetWindowPos, ShowWindow, TranslateMessage,
+    UpdateLayeredWindow, GWLP_USERDATA, HWND_TOPMOST, IDC_CROSS, MSG, MWMO_INPUTAVAILABLE,
+    PM_REMOVE, QS_ALLINPUT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, ULW_ALPHA, WM_KEYDOWN,
+    WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_RBUTTONUP, WM_SETCURSOR, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -105,7 +105,8 @@ impl Scratch {
         let mut base: *mut c_void = std::ptr::null_mut();
         // SAFETY: bmi outlives the call; base points into the DIB we own.
         let dib =
-            unsafe { CreateDIBSection(Some(mon_dc), &bmi, DIB_RGB_COLORS, &mut base, None, 0) };
+            unsafe { CreateDIBSection(Some(mon_dc), &bmi, DIB_RGB_COLORS, &mut base, None, 0) }
+                .ok()?;
         if dib.is_invalid() || base.is_null() {
             return None;
         }
@@ -113,11 +114,11 @@ impl Scratch {
         let mem_dc: HDC = unsafe { CreateCompatibleDC(Some(mon_dc)) };
         if mem_dc.is_invalid() {
             // SAFETY: DIB created above and nothing selected into any DC.
-            unsafe { DeleteObject(dib) };
+            unsafe { DeleteObject(dib.into()) };
             return None;
         }
         // SAFETY: freshly created DC; selecting our DIB is safe.
-        let old = unsafe { SelectObject(mem_dc, dib) };
+        let old = unsafe { SelectObject(mem_dc, dib.into()) };
         Some(Scratch {
             mem_dc,
             dib,
@@ -147,7 +148,7 @@ impl Drop for Scratch {
         unsafe {
             let _ = SelectObject(self.mem_dc, self.old); // unselect DIB first
             let _ = DeleteDC(self.mem_dc);
-            let _ = DeleteObject(self.dib);
+            let _ = DeleteObject(self.dib.into());
         }
     }
 }
@@ -214,8 +215,11 @@ unsafe extern "system" fn overlay_wndproc(
     };
     match msg {
         WM_SETCURSOR => {
-            // SAFETY: load-only cursor resource.
-            unsafe { SetCursor(Some(LoadCursorW(None, IDC_CROSS))) };
+            // SAFETY: load-only cursor resource; a failed load falls back
+            // to the default cursor rather than aborting the selection.
+            if let Ok(cross) = (unsafe { LoadCursorW(None, IDC_CROSS) }) {
+                unsafe { SetCursor(Some(cross)) };
+            }
             LRESULT(1)
         }
         WM_LBUTTONDOWN => {
@@ -333,6 +337,11 @@ fn redraw(shared: &mut Shared, idx: usize) {
 /// Paint the DIB: dim everything, punch a transparent hole for the
 /// selection, accent border, and a live `W × H` readout box.
 fn draw_layer(scratch: &mut Scratch, scale: f64, sel: Option<(i32, i32, i32, i32)>) {
+    // Copy the DC + dims BEFORE the mutable pixel borrow below (HDC and
+    // i32 are Copy); the GDI text pass then needs no re-borrow.
+    let dc = scratch.mem_dc;
+    let mon_w = scratch.w;
+    let mon_h = scratch.h;
     let w = scratch.w as usize;
     let h = scratch.h as usize;
     let px = scratch.pixels();
@@ -444,7 +453,7 @@ pub fn enumerate_monitors() -> Result<Vec<(HMONITOR, CaptureRect)>, Failure> {
             LPARAM(&mut out as *mut _ as isize),
         )
     };
-    if ok.is_err() || out.is_empty() {
+    if !ok.as_bool() || out.is_empty() {
         return Err(Failure::Capture);
     }
     Ok(out)
@@ -595,7 +604,7 @@ impl Win32RegionSelector {
             }
             // SAFETY: no handles; wake on any input for this thread.
             unsafe {
-                MsgWaitForMultipleObjectsEx(&[], 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+                MsgWaitForMultipleObjectsEx(Some(&[]), 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
             // SAFETY: msg buffer valid for the call.
             while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
@@ -647,7 +656,7 @@ impl Win32RegionSelector {
                 // loudly rather than crop a wrong region.
                 let rects: Vec<CaptureRect> = shared.monitors.iter().map(|m| m.rect).collect();
                 monitor_local_crop(&rects, rect)
-                    .map(|_| rect)
+                    .map(|_| Some(rect))
                     .ok_or(Failure::Capture)
             }
             Some(Outcome::Cancelled) => Ok(None),
