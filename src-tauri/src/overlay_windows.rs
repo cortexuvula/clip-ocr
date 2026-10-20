@@ -472,6 +472,33 @@ fn monitor_scale(hmon: HMONITOR) -> f64 {
 /// The Win32 region selector: implements the geometry.rs platform seam.
 pub struct Win32RegionSelector;
 
+/// Outcome of the one-per-process overlay class registration.
+static CLASS_REGISTERED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Register the overlay window class exactly once per process (B1).
+///
+/// `RegisterClassW` fails with `ERROR_CLASS_ALREADY_EXISTS` (atom 0) when
+/// the same class name is registered a second time with the same HINSTANCE
+/// — in a tray resident the second capture would therefore always fail.
+/// The OnceLock makes registration idempotent: the first call registers,
+/// every later call returns the cached outcome. A genuinely failed FIRST
+/// registration stays a failure (nothing is retried); the class is never
+/// unregistered, so it cannot be torn down under live windows.
+fn ensure_overlay_class(hinstance: windows::Win32::Foundation::HMODULE) -> bool {
+    *CLASS_REGISTERED.get_or_init(|| {
+        let cname = class_name_wide();
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(overlay_wndproc),
+            hInstance: HINSTANCE(hinstance.0),
+            lpszClassName: PCWSTR(cname.as_ptr()),
+            ..Default::default()
+        };
+        // SAFETY: wc is fully initialised above; single registration.
+        let atom = unsafe { RegisterClassW(&wc) };
+        atom != 0
+    })
+}
+
 impl Win32RegionSelector {
     /// Show per-monitor overlays and run the modal drag interaction.
     /// Returns `Ok(Some(rect))` in desktop physical pixels, `Ok(None)` on
@@ -508,18 +535,14 @@ impl Win32RegionSelector {
             // SAFETY: module handle of our own process.
             unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
             .map_err(|_| Failure::Capture)?;
-        let cname = class_name_wide();
-        let wc = WNDCLASSW {
-            lpfnWndProc: Some(overlay_wndproc),
-            hInstance: HINSTANCE(hinstance.0),
-            lpszClassName: PCWSTR(cname.as_ptr()),
-            ..Default::default()
-        };
-        // SAFETY: wc is fully initialised above.
-        let atom = unsafe { RegisterClassW(&wc) };
-        if atom == 0 {
+        // B1: idempotent, once-per-process registration (see
+        // ensure_overlay_class). A bare RegisterClassW here used to return
+        // atom 0 with ERROR_CLASS_ALREADY_EXISTS on the SECOND capture in
+        // the resident — every capture after the first failed.
+        if !ensure_overlay_class(hinstance) {
             return Err(Failure::Capture);
         }
+        let cname = class_name_wide();
 
         let mut shared = Shared {
             monitors,
@@ -552,8 +575,19 @@ impl Win32RegionSelector {
                     Some(HINSTANCE(hinstance.0)),
                     None,
                 )
-            }
-            .map_err(|_| Failure::Capture)?;
+            };
+            let hwnd = match hwnd {
+                Ok(hwnd) => hwnd,
+                // H1: monitor N failed but monitors 0..N already created,
+                // shown, and carrying USERDATA into our stack Shared —
+                // tear them ALL down before returning, or a dimmed
+                // click-blocking topmost overlay leaks onto the screen
+                // with a dangling USERDATA pointer.
+                Err(_) => {
+                    destroy_overlays(&mut shared);
+                    return Err(Failure::Capture);
+                }
+            };
             // SAFETY: our window, this thread.
             unsafe {
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, &mut shared as *mut Shared as isize);
@@ -622,28 +656,9 @@ impl Win32RegionSelector {
         let outcome = shared.done.take();
 
         // Destroy every overlay and pump until the destroys settle, so no
-        // overlay pixel can land in the capture. USERDATA is cleared per
-        // window BEFORE Shared goes out of scope.
-        for &hwnd in &shared.hwnds {
-            // SAFETY: our window on this thread.
-            unsafe {
-                let _ = DestroyWindow(hwnd);
-                SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                let _ = InvalidateRect(Some(hwnd), None, true);
-            }
-        }
-        let settle_by = Instant::now() + std::time::Duration::from_secs(1);
-        while Instant::now() < settle_by {
-            // SAFETY: msg buffer valid.
-            while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
-                // SAFETY: standard translate/dispatch.
-                unsafe {
-                    let _ = TranslateMessage(&msg);
-                    DispatchMessageW(&msg);
-                }
-            }
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
+        // overlay pixel can land in the capture.
+        destroy_overlays(&mut shared);
+        pump_until_settled(&shared, &mut msg);
 
         // Let the compositor retire the last overlay frame before capture.
         std::thread::sleep(crate::capture::OVERLAY_HIDE_GRACE);
@@ -664,6 +679,56 @@ impl Win32RegionSelector {
     }
 }
 
+/// Destroy every overlay window and clear its USERDATA (H1 helper, shared
+/// by the normal teardown and the mid-creation failure path). Must run
+/// BEFORE `Shared` goes out of scope — until then the wndproc may still
+/// read it for destroy-time messages.
+fn destroy_overlays(shared: &mut Shared) {
+    for &hwnd in &shared.hwnds {
+        // SAFETY: our window on this thread.
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            let _ = InvalidateRect(Some(hwnd), None, true);
+        }
+    }
+}
+
+/// Drain the message queue until the overlay destroys have settled: exit
+/// EARLY once nothing is pending and every overlay HWND is gone (two
+/// consecutive quiet polls), capped at 1 s so a wedged queue cannot hang
+/// the capture. Without the early exit every capture paid the full second.
+fn pump_until_settled(shared: &Shared, msg: &mut MSG) {
+    let settle_by = Instant::now() + std::time::Duration::from_secs(1);
+    let mut quiet_polls = 0u32;
+    while Instant::now() < settle_by {
+        let mut drained = false;
+        // SAFETY: msg buffer valid.
+        while unsafe { PeekMessageW(msg, None, 0, 0, PM_REMOVE) }.as_bool() {
+            // SAFETY: standard translate/dispatch.
+            unsafe {
+                let _ = TranslateMessage(msg);
+                DispatchMessageW(msg);
+            }
+            drained = true;
+        }
+        // SAFETY: read-only window-liveness query.
+        let any_alive = shared
+            .hwnds
+            .iter()
+            .any(|h| unsafe { windows::Win32::Foundation::IsWindow(*h) }.as_bool());
+        if drained || any_alive {
+            quiet_polls = 0;
+        } else {
+            quiet_polls += 1;
+            if quiet_polls >= 2 {
+                break; // destroys settled; do not burn the remaining budget
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::geometry::OverlaySelector for Win32RegionSelector {
     /// Async seam (see geometry.rs). The Windows capture path calls the
@@ -674,5 +739,29 @@ impl crate::geometry::OverlaySelector for Win32RegionSelector {
         tokio::task::spawn_blocking(|| Win32RegionSelector.select_region())
             .await
             .map_err(|_| Failure::Capture)?
+    }
+}
+
+#[cfg(all(test, target_os = "windows"))]
+mod tests {
+    use super::*;
+
+    /// B1 regression: a second capture in the same process used to fail at
+    /// `RegisterClassW` with `ERROR_CLASS_ALREADY_EXISTS` (atom 0 →
+    /// `Failure::Capture` → exit 6). Registration must be idempotent per
+    /// process. No window is created — this only exercises the
+    /// registration helper, so it runs headlessly on the Windows CI job.
+    #[test]
+    fn overlay_class_registration_is_idempotent_per_process() {
+        let hinstance = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }
+            .expect("module handle");
+        assert!(
+            ensure_overlay_class(hinstance),
+            "first registration must succeed"
+        );
+        assert!(
+            ensure_overlay_class(hinstance),
+            "second registration in the same process must succeed (B1)"
+        );
     }
 }

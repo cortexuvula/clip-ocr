@@ -2,8 +2,6 @@
 use crate::core::InFlightGuard;
 #[cfg(any(target_os = "macos", target_os = "linux", all(test, unix)))]
 use crate::core::MAX_BYTES;
-#[cfg(target_os = "windows")]
-use crate::core::MAX_PIXELS;
 use crate::core::{CaptureDevice, CaptureError, Failure};
 use async_trait::async_trait;
 #[cfg(target_os = "macos")]
@@ -221,9 +219,11 @@ impl CaptureDevice for PlatformCapture {
                 let _ = FirstFrame::start(settings);
                 match rx.recv_timeout(CAPTURE_DEADLINE) {
                     Ok(Ok((w, h, rgba))) => {
-                        // Whole-monitor frame; guard the size before the
-                        // image allocation, then crop the selected region.
-                        if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PIXELS {
+                        // Whole-monitor frame; guard via the pure preflight
+                        // (8K-compatible frame ceiling; the SELECTION is
+                        // what MAX_PIXELS bounds) before the allocation,
+                        // then crop the selected region.
+                        if !crate::geometry::region_preflight(w, h, local) {
                             return Err(CaptureError::Failed(Failure::Capture));
                         }
                         let img = image::RgbaImage::from_raw(w, h, rgba)

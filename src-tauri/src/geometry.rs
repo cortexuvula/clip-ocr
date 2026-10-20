@@ -150,6 +150,41 @@ pub fn constrained_drag(
     })
 }
 
+/// Whole-monitor frame ceiling (pre-crop stage). 8K is 7680×4320 = 33.2M
+/// pixels — ABOVE `MAX_PIXELS` — so the whole-frame stage needs its own,
+/// larger cap: dimensions at most 16384 and at most 64M pixels total. This
+/// bounds the transient whole-frame allocation while keeping 8K monitors
+/// capturable; the SELECTION is separately bounded by `MAX_PIXELS`.
+pub const MAX_FRAME_DIM: u32 = 16_384;
+pub const MAX_FRAME_PIXELS: u64 = 64_000_000;
+
+/// Validate a whole-monitor frame size against a monitor-local selection
+/// before any image is built. True iff: the frame is nonzero and within the
+/// [`MAX_FRAME_DIM`]/[`MAX_FRAME_PIXELS`] whole-monitor ceiling (8K
+/// compatible), the selection is nonzero and fully inside the frame, and
+/// the SELECTION fits `MAX_PIXELS` (the crop is what OCR processes).
+pub fn region_preflight(frame_w: u32, frame_h: u32, local: CaptureRect) -> bool {
+    if frame_w == 0
+        || frame_h == 0
+        || frame_w > MAX_FRAME_DIM
+        || frame_h > MAX_FRAME_DIM
+        || u64::from(frame_w) * u64::from(frame_h) > MAX_FRAME_PIXELS
+    {
+        return false;
+    }
+    if local.width == 0 || local.height == 0 {
+        return false;
+    }
+    let inside = local.x >= 0
+        && local.y >= 0
+        && i64::from(local.x) + i64::from(local.width) <= i64::from(frame_w)
+        && i64::from(local.y) + i64::from(local.height) <= i64::from(frame_h);
+    if !inside {
+        return false;
+    }
+    u64::from(local.width) * u64::from(local.height) <= crate::core::MAX_PIXELS
+}
+
 /// Map a desktop-coordinate selection (physical pixels, e.g. from a Win32
 /// overlay) to the monitor where it began, returning the monitor's index and
 /// the selection translated into monitor-LOCAL pixels for cropping.
@@ -741,6 +776,79 @@ mod tests {
             constrained_drag(monitor, 2.0, (-5.0, -5.0), (-1.0, -1.0)),
             None
         );
+    }
+
+    #[test]
+    fn region_preflight_allows_8k_monitor_with_small_selection() {
+        // 7680x4320 = 33.2M px > MAX_PIXELS (32M): the old guard rejected
+        // the WHOLE frame, so an 8K monitor could never capture even a
+        // tiny region. The frame ceiling must cover 8K; the SELECTION is
+        // what MAX_PIXELS bounds.
+        let small = CaptureRect {
+            x: 100,
+            y: 100,
+            width: 800,
+            height: 600,
+        };
+        assert!(region_preflight(7680, 4320, small));
+        // A 4K monitor obviously fine too.
+        assert!(region_preflight(3840, 2160, small));
+    }
+
+    #[test]
+    fn region_preflight_bounds_the_selection_by_max_pixels() {
+        // A selection larger than MAX_PIXELS (what OCR processes) is out.
+        let w = 8_000u32;
+        let h = (crate::core::MAX_PIXELS / u64::from(w)) as u32 + 1; // > MAX_PIXELS
+        assert!(u64::from(w) * u64::from(h) > crate::core::MAX_PIXELS);
+        assert!(!region_preflight(
+            16_384,
+            16_384,
+            CaptureRect {
+                x: 0,
+                y: 0,
+                width: w,
+                height: h,
+            }
+        ));
+    }
+
+    #[test]
+    fn region_preflight_rejects_oversize_frames_and_mismatched_selections() {
+        let small = CaptureRect {
+            x: 0,
+            y: 0,
+            width: 10,
+            height: 10,
+        };
+        // Zero-size frame is invalid.
+        assert!(!region_preflight(0, 4320, small));
+        // Frame beyond the documented whole-monitor ceiling (>16384 dim or
+        // >64M px) is invalid even for a tiny selection.
+        assert!(!region_preflight(16_385, 4320, small));
+        assert!(!region_preflight(16_384, 16_385, small));
+        // Selection must fit the frame (bad mapping = reject).
+        assert!(!region_preflight(
+            100,
+            100,
+            CaptureRect {
+                x: 90,
+                y: 90,
+                width: 20,
+                height: 20,
+            }
+        ));
+        // Zero-size selection is a cancel, not a frame.
+        assert!(!region_preflight(
+            3840,
+            2160,
+            CaptureRect {
+                x: 0,
+                y: 0,
+                width: 0,
+                height: 10,
+            }
+        ));
     }
 
     #[test]
