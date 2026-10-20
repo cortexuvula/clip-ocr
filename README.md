@@ -10,7 +10,7 @@ Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and n
 |----------|---------|------------|
 | macOS | system region picker (`screencapture`) | Apple Vision, in-process via objc2 (no Swift helper, no image IPC file) |
 | Linux (wlroots/Wayland) | `slurp` + `grim` | Tesseract (`tesseract-rs`) |
-| Windows | WinRT `GraphicsCapturePicker` | `Windows.Media.Ocr` (WinRT) |
+| Windows | crosshair drag-to-select region overlay (Snipping Tool style, per-monitor) | `Windows.Media.Ocr` (WinRT) |
 
 macOS 12+ is the deployment target. Linux has been exercised on Hyprland/wlroots (Omarchy) and Windows on Windows 11.
 
@@ -54,7 +54,7 @@ Then `hyprctl reload` and verify the binding appears in `hyprctl binds`. Sway: `
 
 ### Windows
 
-Capture and OCR ship with Windows 11 (`GraphicsCapturePicker`, `Windows.Media.Ocr`); the only runtime prerequisite is the WebView2 runtime that Tauri already needs. Launch at login is registry-based (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and starts the resident directly, so the resident detaches its own console at startup. Without that, Windows would leave a console/Windows Terminal window open for the whole session because the binary is console-subsystem.
+Capture is a native Win32 overlay (Snipping Tool style): every monitor is dimmed ~47%, a crosshair cursor (`IDC_CROSS`) marks a left-drag rectangle with a live `W × H` pixel readout, and the mouse-up region — clamped to the monitor where the drag began — is captured via Windows Graphics Capture and OCR'd with `Windows.Media.Ocr`. Esc, right-click, or a click without a drag cancels (exit 2); the selection is bounded to 120 s. The drag cannot span monitors by design: the selection is constrained to its origin monitor (mixed-DPI safe — coordinates are physical pixels and the mapping runs through the unit-tested geometry seam). Limitation: the overlay cannot draw above an elevated/admin application (UIPI); Windows blocks that for every non-admin overlay, and ClipOCR does not try to defeat it. The only runtime prerequisite is the WebView2 runtime that Tauri already needs. Launch at login is registry-based (`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`) and starts the resident directly, so the resident detaches its own console at startup. Without that, Windows would leave a console/Windows Terminal window open for the whole session because the binary is console-subsystem.
 
 The binary stays console-subsystem on purpose: `--capture-ocr` waits and returns its exit code to the calling shell. A console inherited from such a caller is never detached — only a console this process owns (the login-autostart launch) is. A brief flash of a terminal window at login is possible, since Windows creates the console before the process runs.
 
@@ -170,7 +170,7 @@ Human acceptance checklist, **not claimed as automated coverage**:
 - Concurrent hotkey/tray/CLI; cold-start CLI; real clipboard failure; hotkey conflict visibly INACTIVE; save/restart persistence; login launch from installed location; close Settings/progress and verify residency.
 - Network disconnected capture-to-clipboard; release Gatekeeper/notarization; supported older macOS versions.
 
-Known platform limitations: DRM-protected video can capture black on every platform. Future Windows xcap/overlay capture cannot draw above elevated/admin applications (UIPI). Notifications are best-effort; statuses remain available through the CLI/tray. Linux/Windows desktop integration and compositor clipboard ownership need their own future smoke matrix.
+Known platform limitations: DRM-protected video can capture black on every platform. The Windows region overlay cannot draw above elevated/admin applications (UIPI) — over an admin window the dimming/selection is not visible (the capture itself still works; cancel and select on a non-elevated area instead). Notifications are best-effort; statuses remain available through the CLI/tray. Linux/Windows desktop integration and compositor clipboard ownership need their own future smoke matrix.
 
 ## Source layout and lineage
 
