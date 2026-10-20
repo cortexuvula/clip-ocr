@@ -10,17 +10,19 @@
     <label>Recognition language<select id="language" required></select></label>
     <label class="check"><input type="checkbox" id="collapse"> Collapse line breaks</label>
     <label class="check"><input type="checkbox" id="login"> Launch at login</label>
-    <button type="submit">Save settings</button>
+    <section id="updates">
+      <h2>Updates</h2>
+      <p id="update-status" role="status" aria-live="polite"></p>
+      <label class="check"><input type="checkbox" id="updates-auto" aria-describedby="updates-disclosure"> Check automatically for updates (daily)</label>
+      <p class="disclosure" id="updates-disclosure">When automatic checks are on, ClipOCR contacts github.com once a day to look for a new version. GitHub can see your IP address. The check does not send your app version, platform, an installation identifier, screenshots, recognized text or clipboard contents. Turning this off stops automatic checks. &ldquo;Check for updates now&rdquo; makes one request even when automatic checks are off.</p>
+      <button type="button" id="update-check">Check for updates now</button>
+      <button type="button" id="update-review" hidden>Review update…</button>
+    </section>
+    <div class="save-row">
+      <button type="submit">Save settings</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </div>
   </form>
-  <section id="updates">
-    <h2>Updates</h2>
-    <p id="update-summary">Automatic update checks are off. No update request is made unless you choose Check for updates.</p>
-    <label class="check"><input type="checkbox" id="updates-auto"> Check automatically (daily)</label>
-    <p class="disclosure">When enabled, ClipOCR contacts github.com to ask for the latest version. GitHub sees your IP address. The request carries no version, platform or install identifier. No screenshots, OCR text or clipboard contents are sent. You can turn this off at any time.</p>
-    <button type="button" id="update-check">Check for updates</button>
-    <button type="button" id="update-review" hidden>Review update…</button>
-  </section>
-  <p id="status" role="status" aria-live="polite"></p>
   <footer>Pixels never touch the clipboard. Copied text inherits OS clipboard syncing and clipboard-manager history. ClipOCR stores no OCR history.</footer>
 </main>
 <div id="progress" hidden role="status">Recognizing text…</div>

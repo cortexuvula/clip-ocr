@@ -3,11 +3,18 @@
 body { margin: 0; } main { padding: 24px; max-width: 660px; } h1 { font-size: 24px; margin-top: 0; } small { font-size: 13px; opacity: .65; }
 p { line-height: 1.5; } label { display: block; margin: 15px 0; } input:not([type=checkbox]), select { display: block; box-sizing: border-box; width: 100%; padding: 8px; margin-top: 5px; font: inherit; }
 .check { display: flex; align-items: center; gap: 8px; } button { font: inherit; padding: 8px 16px; cursor: pointer; } button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px solid #588bff; }
-footer { font-size: 12px; opacity: .75; line-height: 1.45; } #status { min-height: 24px; font-weight: 600; }
+footer { font-size: 12px; opacity: .75; line-height: 1.45; } #status { min-height: 24px; font-weight: 600; margin: 0; }
 #updates h2 { font-size: 16px; margin: 20px 0 8px; } #updates p { margin: 8px 0; } .disclosure { font-size: 12px; opacity: .75; line-height: 1.45; }
+#update-status { min-height: 21px; }
 #updates button + button { margin-left: 8px; }
-/* The Updates section grows the pane: it scrolls instead of clipping. */
-html, body { height: 100%; } main#settings { overflow-y: auto; box-sizing: border-box; height: 100vh; }
+/* The commit action follows its content: one save row at the end of the
+   form with the feedback element adjacent. No sticky bar — it would cover
+   the disclosure and shrink an already short viewport. */
+.save-row { display: flex; align-items: center; gap: 12px; margin-top: 16px; flex-wrap: wrap; }
+/* The Updates section grows the pane: it scrolls instead of clipping, with
+   comfortable bottom padding so button, feedback and footer stay
+   reachable. */
+html, body { height: 100%; } main#settings { overflow-y: auto; box-sizing: border-box; height: 100vh; padding-bottom: 48px; }
 #status.ok { color: #1a7f37; } #status.err { color: #c0392b; }
 body.pill { background: #141418; color: #fff; } #progress { height: 44px; display: grid; place-items: center; font-weight: 500; }
 .sample { background: white; color: black; padding: 24px; font-size: 32px; margin: 20px 0; }
