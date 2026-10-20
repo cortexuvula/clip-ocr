@@ -290,18 +290,15 @@ fn redraw(shared: &mut Shared, idx: usize) {
     let mon = &shared.monitors[idx];
     let scale = mon.scale;
     let sel: Option<(i32, i32, i32, i32)> = match shared.drag {
-        Some((di, start)) if di == idx => {
-            match constrained_drag(mon.rect, mon.scale, start, shared.cur) {
-                Some(r) => Some((
+        Some((di, start)) if di == idx => constrained_drag(mon.rect, mon.scale, start, shared.cur)
+            .map(|r| {
+                (
                     r.x - mon.rect.x,
                     r.y - mon.rect.y,
                     r.width as i32,
                     r.height as i32,
-                )),
-                // Degenerate rect mid-drag: dim only, no hole yet.
-                None => None,
-            }
-        }
+                )
+            }),
         // No drag (initial dim frame) or drag on another monitor.
         _ => None,
     };
@@ -612,7 +609,7 @@ impl Win32RegionSelector {
             while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
                 // SAFETY: standard translate/dispatch of a removed message.
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
                 if shared.done.is_some() {
@@ -641,7 +638,7 @@ impl Win32RegionSelector {
             while unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) }.as_bool() {
                 // SAFETY: standard translate/dispatch.
                 unsafe {
-                    TranslateMessage(&msg);
+                    let _ = TranslateMessage(&msg);
                     DispatchMessageW(&msg);
                 }
             }
