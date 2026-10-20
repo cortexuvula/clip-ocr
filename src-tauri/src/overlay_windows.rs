@@ -716,7 +716,7 @@ fn pump_until_settled(shared: &Shared, msg: &mut MSG) {
         let any_alive = shared
             .hwnds
             .iter()
-            .any(|h| unsafe { windows::Win32::Foundation::IsWindow(*h) }.as_bool());
+            .any(|h| unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(*h) }.as_bool());
         if drained || any_alive {
             quiet_polls = 0;
         } else {
