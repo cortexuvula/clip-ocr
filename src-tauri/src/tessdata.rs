@@ -69,12 +69,23 @@ fn prefix_candidates(prefix: &Path) -> Vec<PathBuf> {
 /// override (if any), then the static candidates, then version directories
 /// discovered under `VERSIONED_PARENT`.
 pub fn search_dirs(env_prefix: Option<&Path>) -> Vec<PathBuf> {
+    let candidates: Vec<_> = CANDIDATE_DIRS.iter().map(PathBuf::from).collect();
+    search_dirs_in(env_prefix, &candidates, Path::new(VERSIONED_PARENT))
+}
+
+/// The production search algorithm with explicit host paths. Tests supply a
+/// private filesystem tree, not the build machine's /usr layout or environment.
+pub fn search_dirs_in(
+    env_prefix: Option<&Path>,
+    candidates: &[PathBuf],
+    versioned_parent: &Path,
+) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = Vec::new();
     if let Some(prefix) = env_prefix {
         dirs.extend(prefix_candidates(prefix));
     }
-    dirs.extend(CANDIDATE_DIRS.iter().map(PathBuf::from));
-    if let Ok(entries) = std::fs::read_dir(VERSIONED_PARENT) {
+    dirs.extend_from_slice(candidates);
+    if let Ok(entries) = std::fs::read_dir(versioned_parent) {
         for entry in entries.flatten() {
             let dir = entry.path().join("tessdata");
             if dir.is_dir() {
@@ -110,7 +121,7 @@ pub fn languages_in(dirs: &[PathBuf]) -> Vec<String> {
             .filter_map(|entry| {
                 let name = entry.file_name().to_string_lossy().into_owned();
                 let base = name.strip_suffix(".traineddata")?.to_owned();
-                (base != NON_LANGUAGE && is_plain_language(&base)).then_some(base)
+                (base != NON_LANGUAGE && has_language(dir, &base)).then_some(base)
             })
             .collect();
         if !langs.is_empty() {
@@ -154,37 +165,106 @@ mod tests {
     #[test]
     fn environment_prefix_may_be_the_tessdata_dir_or_its_parent() {
         let t = tempfile::tempdir().unwrap();
+        let fallback = dir_with(&t.path().join("static"), &["eng"]);
         let inner = dir_with(&t.path().join("prefix").join("tessdata"), &["eng"]);
+        let scan_root = t.path().join("versions");
 
         // Parent form: <prefix>/tessdata.
         assert_eq!(
-            resolve(Some(&t.path().join("prefix")), "eng").as_deref(),
+            resolve_in(
+                &search_dirs_in(
+                    Some(&t.path().join("prefix")),
+                    std::slice::from_ref(&fallback),
+                    &scan_root
+                ),
+                "eng"
+            )
+            .as_deref(),
             Some(inner.as_path())
         );
         // Directory form: <prefix> is already the tessdata dir.
         assert_eq!(
-            resolve(Some(&inner), "eng").as_deref(),
+            resolve_in(
+                &search_dirs_in(Some(&inner), std::slice::from_ref(&fallback), &scan_root),
+                "eng"
+            )
+            .as_deref(),
             Some(inner.as_path())
+        );
+        // If both forms hold data, the directory itself beats its nested child.
+        dir_with(&inner.join("tessdata"), &["eng"]);
+        assert_eq!(
+            resolve_in(
+                &search_dirs_in(Some(&inner), &[fallback], &scan_root),
+                "eng"
+            ),
+            Some(inner)
         );
     }
 
     #[test]
     fn unresolvable_language_leaves_the_library_default_in_place() {
         let t = tempfile::tempdir().unwrap();
-        // No traineddata anywhere under this prefix, so callers must fall back
-        // to the library's own resolution rather than inventing a path.
-        let dirs = prefix_candidates(&t.path().join("nothing"));
+        let other = dir_with(&t.path().join("static"), &["deu"]);
+        let versions = t.path().join("versions");
+        dir_with(&versions.join("future").join("tessdata"), &["fra"]);
+        // Search the same environment/static/runtime stages as production. An
+        // existing tree for another language must not suppress library fallback.
+        let dirs = search_dirs_in(Some(&t.path().join("nothing")), &[other], &versions);
         assert_eq!(resolve_in(&dirs, "eng"), None);
     }
 
     #[test]
     fn language_names_cannot_escape_the_tessdata_directory() {
+        let t = tempfile::tempdir().unwrap();
+        let dir = t.path().join("tessdata");
+        std::fs::create_dir_all(dir.join("eng")).unwrap();
         for bad in ["", "..", "../eng", "eng/../../etc", ".hidden", "e.g"] {
-            assert!(
-                !has_language(Path::new("/usr/share/tessdata"), bad),
-                "{bad}"
-            );
+            // Without name validation these paths really WOULD resolve to a
+            // file. The former nonexistent /usr fixture passed even if all
+            // validation was deleted.
+            let file = dir.join(format!("{bad}.traineddata"));
+            std::fs::write(&file, b"synthetic").unwrap();
+            assert!(file.is_file());
+            assert!(!has_language(&dir, bad), "{bad}");
         }
+    }
+
+    #[test]
+    fn runtime_versioned_scan_finds_languages_after_static_candidates() {
+        let t = tempfile::tempdir().unwrap();
+        let versions = t.path().join("versions");
+        let future = dir_with(&versions.join("99.7").join("tessdata"), &["eng"]);
+        let fallback = dir_with(&t.path().join("static"), &["fra"]);
+        // A regular file named like a version is not a tessdata tree.
+        std::fs::write(versions.join("not-a-directory"), b"synthetic").unwrap();
+        let dirs = search_dirs_in(None, std::slice::from_ref(&fallback), &versions);
+        assert_eq!(resolve_in(&dirs, "eng"), Some(future));
+        dir_with(&fallback, &["eng"]);
+        let dirs = search_dirs_in(None, std::slice::from_ref(&fallback), &versions);
+        assert_eq!(resolve_in(&dirs, "eng"), Some(fallback));
+    }
+
+    #[test]
+    fn unusable_prefix_and_scan_paths_do_not_hide_a_valid_static_language() {
+        let t = tempfile::tempdir().unwrap();
+        let fallback = dir_with(&t.path().join("static"), &["eng"]);
+        let file = t.path().join("file");
+        std::fs::write(&file, b"synthetic").unwrap();
+        let empty = dir_with(&t.path().join("empty"), &[]);
+        for prefix in [&file, &empty] {
+            let dirs = search_dirs_in(Some(prefix), std::slice::from_ref(&fallback), &file);
+            assert_eq!(resolve_in(&dirs, "eng"), Some(fallback.clone()));
+        }
+    }
+
+    #[test]
+    fn languages_ignore_traineddata_directories_and_continue_to_a_usable_tree() {
+        let t = tempfile::tempdir().unwrap();
+        let first = dir_with(&t.path().join("first"), &["osd"]);
+        std::fs::create_dir(first.join("eng.traineddata")).unwrap();
+        let second = dir_with(&t.path().join("second"), &["fra"]);
+        assert_eq!(languages_in(&[first, second]), vec!["fra"]);
     }
 
     #[test]
