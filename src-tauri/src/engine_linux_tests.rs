@@ -331,10 +331,32 @@ fn normalize_maps_configured_tags_to_traineddata_codes() {
         ("el", "ell"),
         ("cs", "ces"),
         ("zh-Hans", "zh"),
+        // Ambiguous-script codes are not guessed: sr (Cyrillic srp vs Latin
+        // srp_latn) and zh must be configured as the traineddata code.
+        ("sr", "sr"),
+        ("sr-Latn", "sr"),
         // traineddata codes keep their underscore instead of being truncated
         ("chi_sim", "chi_sim"),
         ("chi_tra", "chi_tra"),
         ("srp_latn", "srp_latn"),
+        // South Asian and other models, verified present in tessdata_best
+        ("pa", "pan"),
+        ("bn", "ben"),
+        ("ta", "tam"),
+        ("te", "tel"),
+        ("kn", "kan"),
+        ("ml", "mal"),
+        ("mr", "mar"),
+        ("gu", "guj"),
+        ("ne", "nep"),
+        ("si", "sin"),
+        ("ur", "urd"),
+        ("hy", "hye"),
+        ("ka", "kat"),
+        ("kk", "kaz"),
+        ("uz", "uzb"),
+        ("ms", "msa"),
+        ("sw", "swa"),
         ("xx-YY", "xx"),
     ] {
         assert_eq!(
@@ -350,7 +372,7 @@ fn normalize_maps_configured_tags_to_traineddata_codes() {
 /// plausible-looking garbage on the clipboard.
 #[test]
 fn normalize_never_falls_back_to_english_for_an_unknown_tag() {
-    for tag in ["xx", "tlh", "zh", "chi_sim", "srp_latn"] {
+    for tag in ["xx", "tlh", "zh", "sr", "chi_sim", "srp_latn"] {
         let mapped = linux::normalize(tag);
         assert_ne!(
             mapped, "eng",
