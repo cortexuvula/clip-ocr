@@ -123,24 +123,73 @@ impl OcrEngine for TesseractEngine {
 mod linux {
     use super::*;
 
-    /// Tesseract's language codes are BCP-47-ish but NOT identical to the
-    /// macOS Vision tags the config may carry (e.g. "en-US" vs "eng"). Map the
-    /// common superset so a shared config.toml keeps working across platforms.
-    fn normalize(code: &str) -> String {
-        // tesseract-ocr uses "eng", "fra", "deu"... The first 3 chars of a tag
-        // are the ISO 639-2/3 code tesseract expects; fall back to en.
-        let base: String = code
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric())
-            .collect();
-        let code = base.to_ascii_lowercase();
-        match code.as_str() {
-            "" => "eng".into(),
-            "en" | "enus" | "us" => "eng".into(),
-            "fra" | "fre" => "fra".into(),
-            "deu" | "ger" => "deu".into(),
-            _ => code,
-        }
+    /// Map a configured language tag onto the code tesseract's traineddata
+    /// files are named after (ISO 639-2/T), so a config written for macOS
+    /// Vision keeps working on Linux: `en-US`, `fr-CA` and `de` all have to
+    /// find `eng`, `fra` and `deu`.
+    ///
+    /// Only the primary BCP-47 subtag is considered (`fr-CA` → `fr`), while a
+    /// `traineddata` code keeps its underscore (`chi_sim` → itself).
+    ///
+    /// An unrecognised tag is returned unchanged so the engine fails loudly at
+    /// init. It is never rewritten to English: copying text in the wrong
+    /// language is worse than copying nothing, and a silent fallback would turn
+    /// a missing language pack into plausible-looking garbage. Codes that name
+    /// more than one model (`zh` → chi_sim or chi_tra, `sr` → srp or srp_latn)
+    /// are deliberately not guessed.
+    pub(super) fn normalize(code: &str) -> String {
+        let primary = code
+            .split('-')
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let mapped = match primary.as_str() {
+            "" | "en" | "us" => "eng",
+            "af" => "afr",
+            "ar" => "ara",
+            "bg" => "bul",
+            "ca" => "cat",
+            "cs" => "ces",
+            "cy" => "cym",
+            "da" => "dan",
+            "de" | "deu" | "ger" => "deu",
+            "el" => "ell",
+            "es" => "spa",
+            "et" => "est",
+            "fa" => "fas",
+            "fi" => "fin",
+            "fr" | "fra" | "fre" => "fra",
+            "he" => "heb",
+            "hi" => "hin",
+            "hr" => "hrv",
+            "hu" => "hun",
+            "id" => "ind",
+            "is" => "isl",
+            "it" => "ita",
+            "ja" => "jpn",
+            "ka" => "kat",
+            "ko" => "kor",
+            "lt" => "lit",
+            "lv" => "lav",
+            "mk" => "mkd",
+            "nl" => "nld",
+            "no" => "nor",
+            "pl" => "pol",
+            "pt" => "por",
+            "ro" => "ron",
+            "ru" => "rus",
+            "sk" => "slk",
+            "sl" => "slv",
+            "sr" => "srp",
+            "sv" => "swe",
+            "th" => "tha",
+            "tr" => "tur",
+            "uk" => "ukr",
+            "vi" => "vie",
+            other => return other.to_owned(),
+        };
+        mapped.to_owned()
     }
 
     /// `TESSDATA_PREFIX`, if the environment sets it.

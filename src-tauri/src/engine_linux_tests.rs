@@ -299,3 +299,62 @@ fn languages_reject_empty_trees_and_accept_only_the_first_usable_partial_tree() 
         Ok(vec!["fra".into()])
     );
 }
+
+/// A config written for macOS Vision (`en-US`, `fr-CA`) or by hand (`de`) must
+/// resolve to the traineddata file names tesseract actually ships. Before this
+/// was pinned, only `en`/`fra`/`deu` were translated, so any other language
+/// configured by its short code failed init and reported `status: failed,
+/// reason: engine` — the exact symptom this suite exists to prevent.
+#[test]
+fn normalize_maps_configured_tags_to_traineddata_codes() {
+    for (configured, expected) in [
+        ("", "eng"),
+        ("en", "eng"),
+        ("en-US", "eng"),
+        ("eng", "eng"),
+        ("de", "deu"),
+        ("de-DE", "deu"),
+        ("deu", "deu"),
+        ("ger", "deu"),
+        ("fr", "fra"),
+        ("fr-CA", "fra"),
+        ("fre", "fra"),
+        ("es", "spa"),
+        ("es-419", "spa"),
+        ("pt-BR", "por"),
+        ("it", "ita"),
+        ("nl", "nld"),
+        ("ja", "jpn"),
+        ("ko", "kor"),
+        ("ru", "rus"),
+        ("uk", "ukr"),
+        ("el", "ell"),
+        ("cs", "ces"),
+        ("zh-Hans", "zh"),
+        // traineddata codes keep their underscore instead of being truncated
+        ("chi_sim", "chi_sim"),
+        ("chi_tra", "chi_tra"),
+        ("srp_latn", "srp_latn"),
+        ("xx-YY", "xx"),
+    ] {
+        assert_eq!(
+            linux::normalize(configured),
+            expected,
+            "configured language {configured:?}"
+        );
+    }
+}
+
+/// An unknown tag must fail loudly at init, never become English. Silently
+/// OCRing in the wrong language would turn a missing language pack into
+/// plausible-looking garbage on the clipboard.
+#[test]
+fn normalize_never_falls_back_to_english_for_an_unknown_tag() {
+    for tag in ["xx", "tlh", "zh", "chi_sim", "srp_latn"] {
+        let mapped = linux::normalize(tag);
+        assert_ne!(
+            mapped, "eng",
+            "{tag:?} must not be rewritten to English as a silent fall-back"
+        );
+    }
+}
