@@ -157,16 +157,25 @@ mod linux {
         }
     }
 
+    /// The data directory handed to libtesseract for `lang`, or `None` when
+    /// nothing on this host holds `<lang>.traineddata` (the library's own
+    /// resolution then applies).
+    ///
+    /// A bundled libtesseract carries its BUILD distro's compiled-in prefix —
+    /// Debian's `/usr/share/tesseract-ocr/5/tessdata` — and that directory does
+    /// not exist on Arch/Fedora, where the same files live in
+    /// `/usr/share/tessdata`. With a NULL datapath the init therefore fails on
+    /// those distributions and every capture reports `reason: engine` after the
+    /// selection already succeeded. Always resolve explicitly; see
+    /// `tests::an_unusable_tessdata_prefix_does_not_break_ocr`.
+    fn datapath_for(lang: &str) -> Option<String> {
+        crate::tessdata::resolve(env_prefix().as_deref(), lang)
+            .map(|p| p.to_string_lossy().into_owned())
+    }
+
     pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
         let lang = normalize(language);
-        // Pass an explicit data directory. A bundled libtesseract carries its
-        // BUILD distro's compiled-in prefix (e.g. Debian's
-        // /usr/share/tesseract-ocr/5/tessdata), which does not exist on Arch —
-        // with a NULL datapath the init fails there and every capture reports a
-        // failure despite tessdata being installed. None means nothing was
-        // found, so leave the library's own resolution in place.
-        let datapath = crate::tessdata::resolve(env_prefix().as_deref(), &lang)
-            .map(|p| p.to_string_lossy().into_owned());
+        let datapath = datapath_for(&lang);
         // tesseract's API is builder-style: set_image_from_mem consumes self.
         let mut tess = tesseract::Tesseract::new(datapath.as_deref(), Some(&lang))
             .map_err(|_| Failure::Engine)?
@@ -344,5 +353,197 @@ mod tests {
             Err(Failure::Unsupported)
         ));
         assert!(matches!(create(EngineId::WinRt), Err(Failure::Unsupported)));
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod linux_tests {
+    //! The Linux engine is the one place where the OCR library's own data-path
+    //! resolution can silently disagree with the host. These tests run the REAL
+    //! tesseract engine (CI installs `tesseract-ocr` + `tesseract-ocr-eng`) on
+    //! synthetic pixels; no desktop, screen or traineddata of our own.
+    use super::*;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// `TESSDATA_PREFIX` is process-global, so every test that reads or writes
+    /// it takes this lock; `cargo test` runs these on parallel threads.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Assert the engine returned readable text.
+    ///
+    /// The fixture is a synthetic 5x7 bitmap, not a font, so tesseract reads it
+    /// as roughly "HELLO" rather than exactly ("HELLDLDO" with the current
+    /// glyphs). Exact spelling would be a change-detector on the engine's
+    /// model, so the contract asserted here is the one that matters: the engine
+    /// initialized with a resolved datapath and produced alphabetic text.
+    fn assert_recognized_text(result: &OcrResult) {
+        let letters: String = result.text.chars().filter(|c| c.is_alphabetic()).collect();
+        assert!(
+            letters.len() >= 5,
+            "engine returned too little text to be a real recognition (content deliberately omitted)"
+        );
+        assert!(
+            letters.contains('H') && letters.contains('L'),
+            "engine text does not resemble the fixture glyphs (content deliberately omitted)"
+        );
+    }
+
+    /// "HELLO" from synthetic bitmap glyphs, scaled so tesseract's layout
+    /// analysis is comfortable. Only synthetic pixels — a test never captures
+    /// or reads a real screen.
+    fn synthetic_text_png() -> Vec<u8> {
+        const GLYPHS: [[u8; 7]; 5] = [
+            [17, 17, 17, 31, 17, 17, 17], // H
+            [31, 16, 16, 30, 16, 16, 31], // E
+            [16, 16, 16, 16, 16, 16, 31], // L
+            [16, 16, 16, 16, 16, 16, 31], // L
+            [14, 17, 17, 17, 17, 17, 14], // O
+        ];
+        const SCALE: u32 = 16;
+        let mut image = image::RgbImage::from_pixel(900, 220, image::Rgb([255, 255, 255]));
+        for (glyph_index, glyph) in GLYPHS.iter().enumerate() {
+            for (row, bits) in glyph.iter().enumerate() {
+                for col in 0..5u32 {
+                    if bits & (1 << (4 - col)) == 0 {
+                        continue;
+                    }
+                    for dy in 0..SCALE {
+                        for dx in 0..SCALE {
+                            image.put_pixel(
+                                40 + glyph_index as u32 * 140 + col * SCALE + dx,
+                                40 + row as u32 * SCALE + dy,
+                                image::Rgb([0, 0, 0]),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        let mut buffer = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image)
+            .write_to(&mut buffer, image::ImageFormat::Png)
+            .unwrap();
+        buffer.into_inner()
+    }
+
+    /// Run `body` with `TESSDATA_PREFIX` pointed at an EMPTY directory for the
+    /// duration, restoring whatever the host had afterwards.
+    ///
+    /// An empty prefix makes the library's own lookup fail on purpose, so a
+    /// datapath that ClipOCR resolved itself is the only way OCR can succeed.
+    fn with_unusable_tessdata_prefix<T>(body: impl FnOnce() -> T) -> T {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let empty = tempfile::tempdir().unwrap();
+        let saved = std::env::var_os("TESSDATA_PREFIX");
+        std::env::set_var("TESSDATA_PREFIX", empty.path());
+        // The temp dir must outlive the closure; it is dropped after restore.
+        let restored = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+        match saved {
+            Some(value) => std::env::set_var("TESSDATA_PREFIX", value),
+            None => std::env::remove_var("TESSDATA_PREFIX"),
+        }
+        match restored {
+            Ok(value) => value,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    }
+
+    #[test]
+    fn tesseract_reads_synthetic_text_and_reports_no_fabricated_confidence() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let result = create(EngineId::Tesseract)
+            .unwrap()
+            .recognize(&synthetic_text_png(), "en-US")
+            .expect("the Linux engine must initialize on a host with tessdata installed");
+        assert_recognized_text(&result);
+        // Same contract as WinRT: this binding surfaces no per-line confidence,
+        // so the pipeline must never see a made-up number.
+        assert_eq!(result.confidence, None);
+    }
+
+    /// Regression guard for v0.4.1 on Arch: the engine passed a NULL datapath,
+    /// so libtesseract used the prefix compiled into its own build (Debian's
+    /// `/usr/share/tesseract-ocr/5/tessdata`). On a distribution that keeps
+    /// tessdata elsewhere the init failed and every capture reported
+    /// `status: failed, reason: engine` after the drag had already worked.
+    ///
+    /// An unusable `TESSDATA_PREFIX` reproduces that condition on ANY host,
+    /// including Debian: the library's own lookup cannot succeed, so this test
+    /// only passes when ClipOCR resolved the directory itself and passed it in.
+    #[test]
+    fn an_unusable_tessdata_prefix_does_not_break_ocr() {
+        let result = with_unusable_tessdata_prefix(|| {
+            create(EngineId::Tesseract)
+                .unwrap()
+                .recognize(&synthetic_text_png(), "eng")
+        });
+        let result = result.expect(
+            "OCR must not depend on the library's built-in data path: resolve tessdata explicitly",
+        );
+        assert_recognized_text(&result);
+    }
+
+    #[test]
+    fn resolved_datapath_holds_the_requested_language() {
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let datapath = linux::datapath_for("eng").expect("tessdata must be discoverable here");
+        assert!(
+            std::path::Path::new(&datapath)
+                .join("eng.traineddata")
+                .is_file(),
+            "resolved directory must contain the language file, not merely exist"
+        );
+    }
+
+    struct Captured(Vec<u8>);
+    #[async_trait::async_trait]
+    impl CaptureDevice for Captured {
+        async fn capture(&self) -> Result<Vec<u8>, CaptureError> {
+            Ok(self.0.clone())
+        }
+    }
+
+    #[derive(Default)]
+    struct Recorded(std::sync::Mutex<String>);
+    impl Clipboard for Recorded {
+        fn write_text(&self, text: &str) -> Result<(), Failure> {
+            *self.0.lock().unwrap() = text.to_owned();
+            Ok(())
+        }
+    }
+
+    /// The shape the user reported: the capture succeeds, so the failure can
+    /// only be in OCR. Runs the real engine through the real pipeline.
+    #[tokio::test]
+    async fn pipeline_copies_text_recognized_by_the_real_engine() {
+        let clipboard = std::sync::Arc::new(Recorded::default());
+        let pipeline = Pipeline::new(
+            std::sync::Arc::new(Captured(synthetic_text_png())),
+            create(EngineId::Tesseract).unwrap(),
+            clipboard.clone(),
+        );
+        let outcome = tokio::time::timeout(
+            Duration::from_secs(30),
+            pipeline.run("eng".into(), false, &()),
+        )
+        .await
+        .expect("real OCR must finish inside the pipeline deadline");
+        assert_eq!(
+            outcome.status,
+            Status::Copied,
+            "expected copied, got {:?}",
+            outcome.reason
+        );
+        assert!(outcome.chars > 0);
+        let copied = clipboard.0.lock().unwrap().clone();
+        assert!(!copied.trim().is_empty());
+        assert!(copied.chars().filter(|c| c.is_alphabetic()).count() >= 5);
     }
 }
