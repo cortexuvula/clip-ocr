@@ -122,7 +122,6 @@ impl OcrEngine for TesseractEngine {
 #[cfg(target_os = "linux")]
 mod linux {
     use super::*;
-    use std::path::Path;
 
     /// Tesseract's language codes are BCP-47-ish but NOT identical to the
     /// macOS Vision tags the config may carry (e.g. "en-US" vs "eng"). Map the
@@ -144,32 +143,13 @@ mod linux {
         }
     }
 
+    /// `TESSDATA_PREFIX`, if the environment sets it.
+    fn env_prefix() -> Option<std::path::PathBuf> {
+        std::env::var_os("TESSDATA_PREFIX").map(std::path::PathBuf::from)
+    }
+
     pub fn languages() -> Result<Vec<String>, Failure> {
-        // /usr/share/tessdata is the standard install location for
-        // tesseract-ocr data files; also probe TESSDATA_PREFIX.
-        let mut dirs = Vec::new();
-        if let Ok(prefix) = std::env::var("TESSDATA_PREFIX") {
-            dirs.push(Path::new(&prefix).to_path_buf());
-        }
-        dirs.push(Path::new("/usr/share/tessdata").to_path_buf());
-        dirs.push(Path::new("/usr/local/share/tessdata").to_path_buf());
-        let mut langs = Vec::new();
-        for dir in dirs {
-            let Ok(entries) = std::fs::read_dir(dir) else {
-                continue;
-            };
-            for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if let Some(base) = name.strip_suffix(".traineddata") {
-                    // osd is orientation data, not a usable OCR language.
-                    if base != "osd" {
-                        langs.push(base.to_owned());
-                    }
-                }
-            }
-        }
-        langs.sort();
-        langs.dedup();
+        let langs = crate::tessdata::languages(env_prefix().as_deref());
         if langs.is_empty() {
             Err(Failure::Unsupported)
         } else {
@@ -179,8 +159,16 @@ mod linux {
 
     pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
         let lang = normalize(language);
+        // Pass an explicit data directory. A bundled libtesseract carries its
+        // BUILD distro's compiled-in prefix (e.g. Debian's
+        // /usr/share/tesseract-ocr/5/tessdata), which does not exist on Arch —
+        // with a NULL datapath the init fails there and every capture reports a
+        // failure despite tessdata being installed. None means nothing was
+        // found, so leave the library's own resolution in place.
+        let datapath = crate::tessdata::resolve(env_prefix().as_deref(), &lang)
+            .map(|p| p.to_string_lossy().into_owned());
         // tesseract's API is builder-style: set_image_from_mem consumes self.
-        let mut tess = tesseract::Tesseract::new(None, Some(&lang))
+        let mut tess = tesseract::Tesseract::new(datapath.as_deref(), Some(&lang))
             .map_err(|_| Failure::Engine)?
             .set_image_from_mem(png)
             .map_err(|_| Failure::Engine)?;

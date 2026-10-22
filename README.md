@@ -48,6 +48,8 @@ The tray contains Capture, hotkey status (explicit **INACTIVE** on registration 
 
 Dependencies: `tesseract` with the language data you need (e.g. `tesseract-data-eng`), plus `grim` and `slurp` for wlroots compositors (Hyprland, Sway, River).
 
+ClipOCR finds the tessdata directory itself and passes it to the OCR engine, because the `libtesseract` shipped in the bundle carries the path compiled into the build host's package (Debian's `/usr/share/tesseract-ocr/5/tessdata`) rather than the path your distribution uses. Resolution order: `TESSDATA_PREFIX` (either the tessdata directory or its parent), `/usr/share/tessdata`, `/usr/share/tesseract-ocr/{5,4.00}/tessdata`, `/usr/local/share/tessdata`, then any `/usr/share/tesseract-ocr/*/tessdata` found at runtime. If nothing matches, the engine falls back to the library's own resolution.
+
 The resident is started from `~/.config/autostart/clipocr.desktop`. Include `DISPLAY=:0` in `Exec=` so the X11-backed shortcut registration has a display, and keep the WebKit workarounds on NVIDIA/wlroots:
 
 ```ini
