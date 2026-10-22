@@ -66,12 +66,27 @@ jobs:
 
       - name: Rust clippy
         if: matrix.os == 'ubuntu-24.04'
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
         working-directory: src-tauri
 
       - name: Rust tests
-        run: cargo test
+        run: cargo test --locked
         working-directory: src-tauri
+
+      # This is the only host compiling the Linux engine/tests. Each curated
+      # mutation must fail its named assertion (not merely fail compilation),
+      # then pass after the script restores precisely its own source edit.
+      - name: Tessdata fail-then-pass proof (Linux native)
+        if: matrix.os == 'ubuntu-24.04'
+        run: python3 scripts/check_tessdata_mutations.py --linux
+
+      - name: Upload tessdata mutation evidence
+        if: always() && matrix.os == 'ubuntu-24.04'
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4
+        with:
+          name: tessdata-mutation-evidence
+          path: target/tessdata-mutations/
+          if-no-files-found: error
 
       # Debug CI never needs signing/notarization — that is release-only.
       # This smoke build exercises the bundler on each platform (app/dmg/msi/
