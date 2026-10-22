@@ -165,8 +165,8 @@ mod linux {
         // with a NULL datapath the init fails there and every capture reports a
         // failure despite tessdata being installed. None means nothing was
         // found, so leave the library's own resolution in place.
-        let datapath =
-            crate::tessdata::resolve(env_prefix().as_deref(), &lang).map(|p| p.to_string_lossy());
+        let datapath = crate::tessdata::resolve(env_prefix().as_deref(), &lang)
+            .map(|p| p.to_string_lossy().into_owned());
         // tesseract's API is builder-style: set_image_from_mem consumes self.
         let mut tess = tesseract::Tesseract::new(datapath.as_deref(), Some(&lang))
             .map_err(|_| Failure::Engine)?
