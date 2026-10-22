@@ -572,7 +572,7 @@ dependencies = [
 
 [[package]]
 name = "clipocr"
-version = "0.4.2"
+version = "0.4.3"
 dependencies = [
  "async-trait",
  "dirs 6.0.0",
