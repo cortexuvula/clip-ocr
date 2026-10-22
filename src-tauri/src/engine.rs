@@ -168,14 +168,14 @@ mod linux {
     /// those distributions and every capture reports `reason: engine` after the
     /// selection already succeeded. Always resolve explicitly; see
     /// `tests::an_unusable_tessdata_prefix_does_not_break_ocr`.
-    fn datapath_for(lang: &str) -> Option<String> {
+    pub(super) fn datapath_for(lang: &str) -> Option<String> {
         crate::tessdata::resolve(env_prefix().as_deref(), lang)
             .map(|p| p.to_string_lossy().into_owned())
     }
 
     pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
         let lang = normalize(language);
-        let datapath = None; // TEMP: reintroduce the v0.4.1 bug to prove the guard catches it
+        let datapath: Option<String> = None; // TEMP: v0.4.1 bug, to prove the guard catches it
         let _ = datapath_for;
         // tesseract's API is builder-style: set_image_from_mem consumes self.
         let mut tess = tesseract::Tesseract::new(datapath.as_deref(), Some(&lang))
@@ -364,6 +364,7 @@ mod linux_tests {
     //! tesseract engine (CI installs `tesseract-ocr` + `tesseract-ocr-eng`) on
     //! synthetic pixels; no desktop, screen or traineddata of our own.
     use super::*;
+    use crate::core::{CaptureDevice, CaptureError, Clipboard, Pipeline, Status};
     use std::sync::Mutex;
     use std::time::Duration;
 
