@@ -175,7 +175,8 @@ mod linux {
 
     pub fn recognize(png: &[u8], language: &str) -> Result<OcrResult, Failure> {
         let lang = normalize(language);
-        let datapath = datapath_for(&lang);
+        let datapath = None; // TEMP: reintroduce the v0.4.1 bug to prove the guard catches it
+        let _ = datapath_for;
         // tesseract's API is builder-style: set_image_from_mem consumes self.
         let mut tess = tesseract::Tesseract::new(datapath.as_deref(), Some(&lang))
             .map_err(|_| Failure::Engine)?
