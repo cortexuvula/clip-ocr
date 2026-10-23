@@ -2,6 +2,8 @@
 
 A standalone menu-bar utility: **CmdOrCtrl+Alt+X → drag-select → on-device OCR → text on the clipboard**. No main window, accounts, remote OCR, history, or analytics. Recognized text never leaves the device: the ONLY network request ClipOCR ever makes is the optional update check (see [Updates](#updates)), which contacts github.com and GitHub's release-asset hosts.
 
+**Website and downloads: <https://clipocr.ca>** — platform packages, privacy behaviour and the exact caveats for each OS. The [latest release](https://github.com/cortexuvula/clip-ocr/releases/latest) holds the installers.
+
 ## Status and platform scope
 
 Cross-platform single codebase (Tauri 2 + Rust). Engines are all on-device and never call the network (the optional update check is not part of OCR and is off by default):
