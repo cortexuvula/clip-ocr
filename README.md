@@ -116,7 +116,7 @@ A failed clipboard write **can never report copied**. Empty/low-confidence/cance
 
 A private owner-only Unix-domain socket supplements Tauri's single-instance plugin, whose fire-and-forget callback cannot return a terminal result. The resident accepts **only the exact `--capture-ocr` request**, not arbitrary arguments/settings/paths. Each requester gets its own terminal reply. On cold start the CLI serializes launchers, starts the resident without capture arguments, waits for plugins/tray/config to finish setup, then submits exactly one request. Concurrent triggers return `in_progress`, not queued or stacked pickers. Lost responses are failed; a sent request is never silently retried. Startup readiness is bounded to 20 seconds and a request to 640 seconds. Transport failure is nonzero, never an accepted-as-copied success.
 
-No arguments starts the tray resident. `--help` documents the contract. Other flags are rejected. Future Wayland users can bind `clipocr --capture-ocr` from their compositor when global shortcuts are unavailable, but actual Wayland capture is **not yet shipped**.
+No arguments starts the tray resident. `--help` documents the contract. Other flags are rejected. On a Wayland session, bind `clipocr --capture-ocr` from your compositor, because the in-app global shortcut cannot receive events there; the capture itself runs through `slurp` and `grim`.
 
 ## Privacy, storage, bounds, and lifetime
 
@@ -187,8 +187,8 @@ Known platform limitations: DRM-protected video can capture black on every platf
 ## Source layout and lineage
 
 - `core.rs`: injectable `CaptureDevice`, `OcrEngine`, `Clipboard`, typed outcomes, bounded orchestration and RAII leases.
-- `capture.rs` / `storage.rs`: isolated macOS picker/TCC/child lifecycle/private-file handling; explicit unsupported capture elsewhere.
-- `engine.rs`: in-process Vision only, offline allowlist dispatch and runtime languages.
+- `capture.rs` / `storage.rs`: isolated macOS picker/TCC/child lifecycle/private-file handling, the Linux `slurp`+`grim` selection-and-capture path, the Windows overlay capture path, and explicit unsupported capture elsewhere.
+- `engine.rs` / `tessdata.rs`: on-device engines only — Apple Vision (macOS, in-process), Tesseract (Linux), `Windows.Media.Ocr` (Windows) — offline allowlist dispatch, runtime language enumeration and Linux tessdata resolution.
 - `geometry.rs`: FerriScribe pure parsers/clamp/PNG/indicator ports and regression tests, hardened monitor union, per-monitor constraint mapping, alpha-force PNG crop, future overlay trait.
 - `config.rs` / `ipc.rs`: raw TOML validation/atomic save, private CLI terminal request/reply protocol.
 - `desktop.rs` / `ui/`: Tauri tray/plugins, text-only clipboard adapter, on-demand Settings/progress and dev-only interactive selftest.

@@ -9,7 +9,8 @@ use std::sync::{atomic::AtomicBool, Arc};
 use std::{path::PathBuf, time::Duration};
 pub const CAPTURE_DEADLINE: Duration = Duration::from_secs(600);
 pub const OVERLAY_SELECT_TIMEOUT: Duration = Duration::from_secs(120);
-/// Slow compositors may need this raised when overlay platforms are implemented.
+/// Slow compositors may need this raised. The Windows overlay sleeps this long
+/// after hiding its windows so the dim layer is gone before the frame grab.
 pub const OVERLAY_HIDE_GRACE: Duration = Duration::from_millis(250);
 
 #[cfg(target_os = "macos")]

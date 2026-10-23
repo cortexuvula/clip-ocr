@@ -1,5 +1,6 @@
-//! Only the native, local Vision engine ships in the macOS spike. No provider
-//! resolution, remote overrides, helpers or IPC image files exist here.
+//! Only native, on-device engines ship: Apple Vision (macOS), Tesseract (Linux)
+//! and `Windows.Media.Ocr` (Windows). No provider resolution, remote overrides,
+//! helpers or IPC image files exist here.
 use crate::core::{EngineId, Failure, OcrEngine, OcrResult};
 use std::sync::Arc;
 // Vision candidate confidence is 0..1, NOT comparable to Tesseract's scale.
