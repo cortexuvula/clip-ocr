@@ -588,7 +588,7 @@ pub fn run(root: PathBuf, selftest: bool) -> Result<(), Box<dyn std::error::Erro
             let lock = options.open(root.join("instance.lock"))?;
             lock.try_lock_exclusive()
                 .map_err(|_| "Another ClipOCR instance owns this profile")?;
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "linux"))]
             {
                 let dir = storage::capture_dir(&root)
                     .map_err(|_| "Unsafe capture directory; move it aside and restart ClipOCR")?;

@@ -19,3 +19,6 @@ src-tauri/gen/schemas
 .idea
 .vscode
 *.swp
+
+# Local security-scan scratch (matches at any depth)
+.mimosa/
