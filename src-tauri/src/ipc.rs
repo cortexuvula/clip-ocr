@@ -175,6 +175,14 @@ const REQUEST_DEADLINE: Duration = Duration::from_secs(2);
 #[cfg(any(windows, test))]
 const PIPE_RECYCLE_PAUSE: Duration = Duration::from_millis(25);
 
+/// Total attempts (initial + retries) to (re)create the pipe instance
+/// before `serve_blocking` gives up. A create can transiently fail with
+/// ERROR_ACCESS_DENIED while the previous instance's disconnect
+/// completion is still draining past [`PIPE_RECYCLE_PAUSE`] under load;
+/// giving up on the first failure would kill IPC until app restart.
+#[cfg(any(windows, test))]
+const PIPE_CREATE_ATTEMPTS: u32 = 4;
+
 /// Bounded responder behind the Windows named-pipe server (and the duplex
 /// streams in tests, which satisfy the same AsyncRead + AsyncWrite contract
 /// as a NamedPipeServer). That transport has NO half-close — the real CLI
@@ -286,29 +294,45 @@ mod named {
         rt.block_on(async move {
             let name = pipe_name(&root);
             loop {
-                let server = match tokio::net::windows::named_pipe::ServerOptions::new()
-                    .first_pipe_instance(true)
-                    .create(&name)
-                {
-                    Ok(s) => s,
-                    Err(_) => return Err(Failure::Unavailable),
+                // Recreate the single instance, retrying briefly: a create
+                // can transiently fail while the previous instance's
+                // disconnect completion drains past PIPE_RECYCLE_PAUSE under
+                // load. Giving up kills IPC until app restart, so only exit
+                // after PIPE_CREATE_ATTEMPTS tries.
+                let mut attempt = 1;
+                let server = loop {
+                    match tokio::net::windows::named_pipe::ServerOptions::new()
+                        .first_pipe_instance(true)
+                        .create(&name)
+                    {
+                        Ok(s) => break s,
+                        Err(_) if attempt < PIPE_CREATE_ATTEMPTS => {
+                            attempt += 1;
+                            tokio::time::sleep(PIPE_RECYCLE_PAUSE).await;
+                        }
+                        Err(_) => return Err(Failure::Unavailable),
+                    }
                 };
                 // A created instance is listening but NOT connected: tokio's
                 // AsyncRead for NamedPipeServer polls the IO directly, so a
                 // read can never deliver data until the client handshake is
-                // completed by an explicit connect(). Park here — this is
-                // where the loop waits for the next CLI invocation.
-                match tokio::time::timeout(REQUEST_DEADLINE, server.connect()).await {
-                    Ok(Ok(())) => {
+                // completed by an explicit connect(). Park here for as long
+                // as a client takes: this unbounded park IS the loop's idle
+                // state. A deadline here would drop and recreate the
+                // instance every period — pure churn, and each recreate
+                // leaves a window where a CLI open finds no listener and
+                // cold-starts a redundant resident.
+                match server.connect().await {
+                    Ok(()) => {
                         // Answer one client, then loop to rebind for the next invocation.
                         let _ = respond_std(server, handler.clone()).await;
                     }
-                    // A timed-out or failed handshake leaves no client to
-                    // reply to: release the instance (dropping the pipe is
-                    // what lets the next create rebind) and take the next
-                    // iteration — same fail-closed discipline as every other
-                    // branch, and never a leaked handle.
-                    _ => drop(server),
+                    // A failed handshake leaves no client to reply to:
+                    // release the instance (dropping the pipe is what lets
+                    // the next create rebind) and take the next iteration —
+                    // same fail-closed discipline as every other branch, and
+                    // never a leaked handle.
+                    Err(_) => drop(server),
                 }
                 // Drain the reactor between instances: the just-closed
                 // instance's disconnect completion must be delivered before
@@ -369,7 +393,10 @@ mod named {
                 // size instead of waiting for an EOF.
                 let _ = pipe.shutdown().await;
                 let mut bytes = Vec::new();
-                if pipe.read_to_end(&mut bytes).await.is_err() {
+                // Bound the reply read like the Unix client (take(4096)): a
+                // same-session impostor squatting on the pipe name must not
+                // be able to balloon the CLI's memory with an endless reply.
+                if pipe.take(4096).read_to_end(&mut bytes).await.is_err() {
                     return Outcome::failed(Failure::Unavailable);
                 }
                 return serde_json::from_slice(&bytes)
@@ -584,6 +611,7 @@ mod respond_bounded_tests {
         // cfg(any(windows, test)) build (and any regression of the drain
         // window is caught in review, not silently tuned).
         assert_eq!(PIPE_RECYCLE_PAUSE, Duration::from_millis(25));
+        assert_eq!(PIPE_CREATE_ATTEMPTS, 4);
         // The read is exact-size (REQUEST.len()), never an unbounded
         // read_to_end; the only further byte ever read is the single
         // probe byte past a matching request.
@@ -807,13 +835,15 @@ mod named_pipe_tests {
             })
             .unwrap();
         wait_until_listening(root.path());
-        // The second probe's dropped-handle exchange now takes the
-        // client-gone skip path (no reply write), so the rebind follows the
-        // disconnect almost immediately; still settle past the old
-        // REQUEST_DEADLINE-sized window so the real client's first open
-        // lands on a parked instance and never takes the cold-start branch
-        // (which would spawn this test binary as the "resident",
-        // recursively re-running the suite as a process farm).
+        // The second probe's dropped-handle exchange takes the client-gone
+        // skip path (no reply write), so the rebind follows the disconnect
+        // within PIPE_RECYCLE_PAUSE; settle well past that window so the
+        // real client's first open lands on the parked instance and never
+        // takes the cold-start branch (which would spawn this test binary
+        // as the "resident", recursively re-running the suite as a process
+        // farm). serve_blocking parks on connect() with no deadline, so
+        // once rebound there is no recycle cycle left to race: the instance
+        // stays parked until this client opens it.
         std::thread::sleep(REQUEST_DEADLINE + Duration::from_millis(500));
         // A hang must fail the test, never the suite: bound the client call
         // with a watchdog instead of blocking the test thread indefinitely.
