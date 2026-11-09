@@ -107,15 +107,14 @@ impl CaptureDevice for PlatformCapture {
         }
         #[cfg(target_os = "linux")]
         {
-            let root = self.root.clone();
-            tokio::task::spawn_blocking(move || {
-                let dir = crate::storage::capture_dir(&root).map_err(CaptureError::Failed)?;
-                capture_with_command(&dir, CAPTURE_DEADLINE, |path| {
+            tokio::task::spawn_blocking(|| {
+                capture_via_pipe(CAPTURE_DEADLINE, || {
                     // slurp prints the selected region as "x,y WxH" on stdout.
-                    // grim -g captures exactly that region to the target path.
+                    // grim -g captures exactly that region; "-" makes it write
+                    // the PNG to stdout, so no capture file ever exists.
                     let geometry = slurp_geometry()?;
                     let mut cmd = std::process::Command::new("grim");
-                    cmd.args(["-g", &geometry, "-t", "png"]).arg(path);
+                    cmd.args(["-g", &geometry, "-t", "png", "-"]);
                     Ok::<std::process::Command, CaptureError>(cmd)
                 })
             })
@@ -308,7 +307,9 @@ impl Drop for ChildGuard {
         let _ = self.0.wait();
     }
 }
-#[cfg(any(target_os = "macos", target_os = "linux", test))]
+// Linux capture is pipe-based (capture_via_pipe); this file-based path is
+// macOS-only in production but stays compiled for tests on all Unix.
+#[cfg(any(target_os = "macos", test))]
 #[cfg(unix)]
 fn capture_with_command(
     dir: &std::path::Path,
@@ -408,6 +409,121 @@ fn capture_with_command(
     if bytes.len() > MAX_BYTES {
         return Err(CaptureError::Failed(Failure::Capture));
     }
+    Ok(bytes)
+}
+
+/// How long the timeout branch of [`capture_via_pipe`] waits, after the
+/// child is killed and reaped, for the reader thread to finish before
+/// detaching (leaking) it. Bounded because a pipe-inheriting grandchild can
+/// keep the reader's read in progress forever.
+#[cfg(any(target_os = "linux", test))]
+#[cfg(unix)]
+const READER_DETACH_WINDOW: Duration = Duration::from_millis(500);
+
+/// Linux capture pipeline: the child (grim) writes the PNG to stdout, so no
+/// capture file is ever created. The read is bounded to `MAX_BYTES + 1`, the
+/// whole exchange is deadline-bounded with the same kill-and-reap discipline
+/// as [`capture_with_command`] (via [`ChildGuard`]), and `validate_png` gates
+/// the bytes before they can reach the engine.
+///
+/// After a timeout, the reader thread is given at most
+/// [`READER_DETACH_WINDOW`] to finish on its own; a grandchild that
+/// inherited the stdout write end can keep the pipe open indefinitely, so
+/// past that window the reader is detached (leaked) rather than joined —
+/// it holds only a pipe handle and bounded scratch.
+#[cfg(any(target_os = "linux", test))]
+#[cfg(unix)]
+fn capture_via_pipe(
+    deadline: Duration,
+    command: impl FnOnce() -> Result<std::process::Command, CaptureError>,
+) -> Result<Vec<u8>, CaptureError> {
+    use std::{io::Read, process::Stdio, thread, time::Instant};
+    let mut child = ChildGuard(
+        command()?
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|_| CaptureError::Failed(Failure::Capture))?,
+    );
+    let stdout = child
+        .0
+        .stdout
+        .take()
+        .ok_or(CaptureError::Failed(Failure::Capture))?;
+    // Bounded read on a helper thread: a hung child must not pin the deadline
+    // loop below, and killing the child closes the pipe and unblocks this read.
+    let reader = thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes);
+        (result, bytes)
+    });
+    let start = Instant::now();
+    let (read_result, bytes) = loop {
+        if reader.is_finished() {
+            break reader
+                .join()
+                .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+        }
+        if start.elapsed() >= deadline {
+            // Terminate + reap before returning. The killed child's closed
+            // handle usually lets the reader finish on its own — but a
+            // grandchild that inherited the stdout WRITE end can keep the
+            // pipe open indefinitely, and joining it would pin this thread
+            // (and Pipeline::in_flight) until restart. Poll briefly, then
+            // detach: never join unconditionally.
+            let _ = child.0.kill();
+            child
+                .0
+                .wait()
+                .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+            let killed_at = Instant::now();
+            while !reader.is_finished() && killed_at.elapsed() < READER_DETACH_WINDOW {
+                thread::sleep(Duration::from_millis(5));
+            }
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
+            return Err(CaptureError::Failed(Failure::Timeout));
+        }
+        thread::sleep(Duration::from_millis(10));
+    };
+    if bytes.len() > MAX_BYTES {
+        // Over budget: the writer is likely blocked on a full pipe after the
+        // bounded read stopped at the cap. Kill and reap before failing.
+        let _ = child.0.kill();
+        child
+            .0
+            .wait()
+            .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+        return Err(CaptureError::Failed(Failure::Capture));
+    }
+    // The child may still be running after closing stdout; bound its exit with
+    // the SAME deadline, exactly like capture_with_command's wait loop.
+    let status = loop {
+        match child.0.try_wait() {
+            Ok(Some(status)) => break status,
+            Err(_) => return Err(CaptureError::Failed(Failure::Capture)),
+            Ok(None) if start.elapsed() >= deadline => {
+                let _ = child.0.kill();
+                child
+                    .0
+                    .wait()
+                    .map_err(|_| CaptureError::Failed(Failure::Capture))?;
+                return Err(CaptureError::Failed(Failure::Timeout));
+            }
+            Ok(None) => thread::sleep(Duration::from_millis(10)),
+        }
+    };
+    drop(child);
+    if !status.success() {
+        return Err(CaptureError::Cancelled);
+    }
+    read_result.map_err(|_| CaptureError::Failed(Failure::Capture))?;
+    if bytes.is_empty() {
+        return Err(CaptureError::Cancelled);
+    }
+    crate::core::validate_png(&bytes).map_err(|_| CaptureError::Failed(Failure::InvalidPng))?;
     Ok(bytes)
 }
 
@@ -546,5 +662,132 @@ mod tests {
         })
         .is_err());
         assert_eq!(std::fs::read_dir(t.path()).unwrap().count(), 0);
+    }
+
+    fn synthetic_png() -> Vec<u8> {
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgba8(2, 2)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        bytes.into_inner()
+    }
+
+    /// storage::capture_dir insists on an exactly-0700 root; tempfile dirs
+    /// inherit the umask, so tighten before validating.
+    fn private_capture_dir(root: &std::path::Path) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::storage::capture_dir(root).unwrap()
+    }
+
+    #[test]
+    fn piped_capture_writes_no_file_and_returns_png_bytes() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = private_capture_dir(root.path());
+        let png = synthetic_png();
+        let source = root.path().join("synthetic.png");
+        std::fs::write(&source, &png).unwrap();
+        let bytes = capture_via_pipe(Duration::from_secs(5), || {
+            let mut c = std::process::Command::new("/bin/cat");
+            c.arg(&source);
+            Ok(c)
+        })
+        .unwrap();
+        assert_eq!(bytes, png);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn piped_oversized_stdout_fails_typed_and_reaps_child() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = private_capture_dir(root.path());
+        let pid_file = root.path().join("pid");
+        let result = capture_via_pipe(Duration::from_secs(10), || {
+            let mut c = std::process::Command::new("/usr/bin/perl");
+            c.arg("-e")
+                .arg(format!(
+                    "open(my $pid, '>', $ARGV[0]) or die; print $pid $$; close $pid; print \"A\" x {};",
+                    MAX_BYTES + 8
+                ))
+                .arg(&pid_file);
+            Ok(c)
+        });
+        assert!(matches!(
+            result,
+            Err(CaptureError::Failed(Failure::Capture))
+        ));
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn piped_hung_stdout_times_out_reaps_child_and_writes_no_file() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = private_capture_dir(root.path());
+        let pid_file = root.path().join("pid");
+        let result = capture_via_pipe(Duration::from_millis(80), || {
+            let mut c = std::process::Command::new("/usr/bin/perl");
+            c.arg("-e").arg("open(my $pid, '>', $ARGV[0]) or die; print $pid $$; close $pid; select(undef,undef,undef,10);").arg(&pid_file);
+            Ok(c)
+        });
+        assert!(matches!(
+            result,
+            Err(CaptureError::Failed(Failure::Timeout))
+        ));
+        let pid: i32 = std::fs::read_to_string(pid_file).unwrap().parse().unwrap();
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn piped_invalid_png_output_is_rejected_before_engine() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = private_capture_dir(root.path());
+        let result = capture_via_pipe(Duration::from_secs(5), || {
+            let mut c = std::process::Command::new("/usr/bin/perl");
+            c.arg("-e").arg("print \"definitely not a png\";");
+            Ok(c)
+        });
+        assert!(matches!(
+            result,
+            Err(CaptureError::Failed(Failure::InvalidPng))
+        ));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn piped_timeout_detaches_reader_when_grandchild_holds_the_pipe() {
+        // The direct child exits fast, but a backgrounded grandchild
+        // inherits the stdout write end and outlives it, so the pipe never
+        // closes and the reader thread can never see EOF. The timeout
+        // branch must not join that reader forever (it would pin this
+        // spawn_blocking thread and Pipeline::in_flight until restart).
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let result = capture_via_pipe(Duration::from_millis(80), || {
+                let mut c = std::process::Command::new("/bin/sh");
+                c.arg("-c").arg("sleep 30 & exec sleep 1");
+                Ok(c)
+            });
+            let _ = tx.send(result);
+        });
+        // Watchdog: pre-fix, the timeout branch joins a reader pinned by
+        // the grandchild and blocks until the 30s sleeper exits.
+        let result = rx
+            .recv_timeout(Duration::from_secs(8))
+            .expect("capture_via_pipe must return within the watchdog");
+        assert!(matches!(
+            result,
+            Err(CaptureError::Failed(Failure::Timeout))
+        ));
     }
 }

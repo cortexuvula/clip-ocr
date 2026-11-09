@@ -44,6 +44,12 @@ pub const BACKOFF_LADDER: [Duration; 3] = [
     Duration::from_secs(12 * 60 * 60),
     Duration::from_secs(24 * 60 * 60),
 ];
+/// Maximum `Retry-After` (429) honored from the service: 7 days
+/// (604800 s), comfortably above the 24h ladder top. The transport clamps
+/// to this at the source, so a hostile or misbehaving endpoint can neither
+/// stretch the backoff without bound nor push `Instant` deadline
+/// arithmetic out of range ([`Cadence::due`] is checked regardless).
+pub const MAX_RETRY_AFTER: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 /// Manual redirect hops before giving up.
 const MAX_REDIRECT_HOPS: usize = 3;
 
@@ -104,7 +110,8 @@ pub fn is_newer(latest: &str, current: &str) -> Option<bool> {
 pub struct HttpResponse {
     pub status: u16,
     pub location: Option<String>,
-    /// `Retry-After` in seconds, when the service sent one.
+    /// `Retry-After` as delay-seconds, when the service sent a parseable
+    /// one — clamped to [`MAX_RETRY_AFTER`] at the transport.
     pub retry_after: Option<Duration>,
     pub body: Vec<u8>,
 }
@@ -276,7 +283,11 @@ impl Cadence {
 
     /// Whether an AUTOMATIC check is due NOW. Never while a check is in
     /// flight or a capture/OCR lease is held (defer, do not catch up).
-    /// Jitter only ever ADDS delay, so the 24h minimum holds.
+    /// Jitter only ever ADDS delay, so the 24h minimum holds. All
+    /// deadline arithmetic is checked: an `Instant + Duration` sum that
+    /// does not fit defers the check (returns false) instead of panicking
+    /// — a panic in the resident tick loop would kill periodic checks
+    /// until restart.
     pub fn due(
         &self,
         now: Instant,
@@ -287,21 +298,30 @@ impl Cadence {
         if check_in_flight || capture_busy {
             return false;
         }
-        if now < self.launch + MIN_DELAY_AFTER_LAUNCH + jitter {
+        let Some(launch_gate) = self
+            .launch
+            .checked_add(MIN_DELAY_AFTER_LAUNCH)
+            .and_then(|t| t.checked_add(jitter))
+        else {
+            return false; // unrepresentable gate: defer
+        };
+        if now < launch_gate {
             return false;
         }
-        let next = match (self.failures, self.last_success, self.last_attempt) {
+        let deadline = match (self.failures, self.last_success, self.last_attempt) {
             // Healthy: once per 24h since the last SUCCESS.
-            (0, Some(t), _) => Some(t + CHECK_INTERVAL),
+            (0, Some(t), _) => t.checked_add(CHECK_INTERVAL),
             // Failure ladder: since the last ATTEMPT, 6h/12h/24h
             // (or a longer Retry-After).
-            (f, _, Some(t)) if f > 0 => Some(t + self.effective_backoff()),
+            (f, _, Some(t)) if f > 0 => t.checked_add(self.effective_backoff()),
             // Never attempted: gated only by the launch delay above.
-            _ => None,
+            _ => return true,
         };
-        match next {
-            Some(n) => now >= n + jitter,
-            None => true,
+        match deadline.and_then(|d| d.checked_add(jitter)) {
+            Some(d) => now >= d,
+            // Unrepresentable deadline (extreme Retry-After): defer,
+            // never panic.
+            None => false,
         }
     }
 }
@@ -562,6 +582,17 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
 /// a typed failure — never a downgrade to plain HTTP.
 pub struct UreqTransport;
 
+/// Parse a `Retry-After` header value (delay-seconds form) into a bounded
+/// [`Duration`] for [`HttpResponse::retry_after`]: values beyond
+/// [`MAX_RETRY_AFTER`] clamp to it, anything unparseable is `None` (the
+/// backoff ladder then governs on its own). The clamp lives HERE, at the
+/// transport, so no unbounded server value ever crosses into cadence
+/// `Instant` arithmetic.
+fn parse_retry_after(value: &str) -> Option<Duration> {
+    let secs: u64 = value.parse().ok()?;
+    Some(Duration::from_secs(secs.min(MAX_RETRY_AFTER.as_secs())))
+}
+
 impl UpdateTransport for UreqTransport {
     fn get(
         &self,
@@ -580,13 +611,11 @@ impl UpdateTransport for UreqTransport {
         };
         let status = resp.status();
         if status != 200 {
-            let retry_after = resp
-                .header("retry-after")
-                .and_then(|v| v.parse::<u64>().ok());
+            let retry_after = resp.header("retry-after").and_then(parse_retry_after);
             return Ok(HttpResponse {
                 status,
                 location: resp.header("location").map(str::to_owned),
-                retry_after: retry_after.map(Duration::from_secs),
+                retry_after,
                 body: Vec::new(),
             });
         }
@@ -1015,6 +1044,125 @@ mod tests {
         assert_eq!(c.effective_backoff(), BACKOFF_LADDER[2]);
     }
 
+    #[test]
+    fn cadence_due_with_extreme_override_defers_instead_of_panicking() {
+        // Regression (red against the pre-fix baseline): a Retry-After at
+        // the top of the u64 range made the unchecked `Instant + Duration`
+        // sum PANIC inside `due`, killing the resident's periodic-check
+        // task until restart. The deadline is unrepresentable, so the
+        // check must defer — never panic.
+        let launch = Instant::now();
+        let c = Cadence {
+            launch,
+            last_attempt: Some(launch),
+            last_success: None,
+            failures: 1,
+            retry_after_override: Some(Duration::from_secs(u64::MAX)),
+        };
+        for elapsed in [
+            Duration::ZERO,
+            MIN_DELAY_AFTER_LAUNCH,
+            BACKOFF_LADDER[0],
+            BACKOFF_LADDER[2],
+            CHECK_INTERVAL,
+            CHECK_INTERVAL * 7,
+        ] {
+            let now = launch + elapsed;
+            assert!(
+                !c.due(now, Duration::ZERO, false, false),
+                "unrepresentable deadline must defer (elapsed {elapsed:?})"
+            );
+        }
+        // Jitter on top of the unrepresentable deadline stays safe too.
+        assert!(!c.due(launch + MAX_JITTER, MAX_JITTER, false, false));
+    }
+
+    #[test]
+    fn extreme_429_through_check_once_keeps_cadence_safe() {
+        // End-to-end regression: a 429 whose Retry-After is the extreme
+        // valid u64 — exactly what the pre-fix transport produced — must
+        // survive check_once AND every later due() call without a panic.
+        let t = FakeTransport::new(vec![Ok(HttpResponse {
+            status: 429,
+            location: None,
+            retry_after: Some(Duration::from_secs(u64::MAX)),
+            body: Vec::new(),
+        })]);
+        let (reason, override_) = check_once(t.as_ref(), CURRENT).unwrap_err();
+        assert_eq!(reason, CheckReason::RateLimited);
+
+        let launch = Instant::now();
+        let c = Cadence {
+            launch,
+            last_attempt: Some(launch),
+            last_success: None,
+            failures: 1,
+            retry_after_override: override_,
+        };
+        let now = launch + BACKOFF_LADDER[2] + MAX_JITTER;
+        assert!(!c.due(now, Duration::ZERO, false, false));
+        assert!(!c.due(now, MAX_JITTER, false, false));
+    }
+
+    #[test]
+    fn retry_after_header_clamps_extreme_valid_u64_to_seven_days() {
+        // u64::MAX as a decimal header: a syntactically VALID
+        // delay-seconds value whose raw Duration overflows every Instant
+        // deadline sum. The transport clamps it to the documented ceiling.
+        assert_eq!(
+            parse_retry_after(&u64::MAX.to_string()),
+            Some(MAX_RETRY_AFTER)
+        );
+        // At the cap it stays; just under it passes through untouched.
+        assert_eq!(
+            parse_retry_after(&MAX_RETRY_AFTER.as_secs().to_string()),
+            Some(MAX_RETRY_AFTER)
+        );
+        assert_eq!(
+            parse_retry_after("604799"),
+            Some(Duration::from_secs(604_799))
+        );
+        // Ordinary values are unchanged.
+        assert_eq!(parse_retry_after("7200"), Some(Duration::from_secs(7200)));
+        // Unparseable (or out of u64 range) stays None — the ladder
+        // governs on its own.
+        for bad in ["soon", "", "-1", "1.5", "99999999999999999999"] {
+            assert_eq!(parse_retry_after(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn clamped_429_override_bounds_the_wait_at_seven_days() {
+        // The post-clamp contract: the fixed transport surfaces an extreme
+        // Retry-After as exactly MAX_RETRY_AFTER, the override beats the
+        // ladder top, and due() flips exactly at the 7-day deadline.
+        let t = FakeTransport::new(vec![Ok(HttpResponse {
+            status: 429,
+            location: None,
+            retry_after: Some(MAX_RETRY_AFTER),
+            body: Vec::new(),
+        })]);
+        assert_eq!(
+            check_once(t.as_ref(), CURRENT),
+            Err((CheckReason::RateLimited, Some(MAX_RETRY_AFTER)))
+        );
+
+        let launch = Instant::now();
+        let c = Cadence {
+            launch,
+            last_attempt: Some(launch),
+            last_success: None,
+            failures: 1,
+            retry_after_override: Some(MAX_RETRY_AFTER),
+        };
+        assert_eq!(c.effective_backoff(), MAX_RETRY_AFTER);
+        // Ladder top (24h) no longer governs; the clamped override does.
+        assert!(!c.due(launch + BACKOFF_LADDER[2], Duration::ZERO, false, false));
+        let just_under = MAX_RETRY_AFTER - Duration::from_secs(1);
+        assert!(!c.due(launch + just_under, Duration::ZERO, false, false));
+        assert!(c.due(launch + MAX_RETRY_AFTER, Duration::ZERO, false, false));
+    }
+
     // ---- manager state machine ----
 
     #[test]
@@ -1041,6 +1189,60 @@ mod tests {
                 .is_some(),
             "automatic re-check must respect the backoff ladder"
         );
+    }
+
+    #[test]
+    fn manager_429_stores_override_and_success_clears_it() {
+        let t = FakeTransport::new(vec![
+            Ok(HttpResponse {
+                status: 429,
+                location: None,
+                retry_after: Some(Duration::from_secs(2 * 60 * 60)),
+                body: Vec::new(),
+            }),
+            resp(200, ok_body(CURRENT, NOTES)),
+        ]);
+        let m = UpdateManager::with_version(t.clone(), true, CURRENT);
+        m.request_manual();
+        let lease = m
+            .tick(Instant::now(), Duration::ZERO, false)
+            .expect("manual check starts");
+        m.run_check(&lease, SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            m.status(),
+            UpdateStatus::Failed {
+                reason: CheckReason::RateLimited
+            }
+        );
+        {
+            let inner = m.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert_eq!(inner.cadence.failures, 1);
+            assert_eq!(
+                inner.cadence.retry_after_override,
+                Some(Duration::from_secs(2 * 60 * 60))
+            );
+        }
+        drop(lease);
+        // +3h: not due yet — the 6h ladder rung governs (a SHORTER
+        // Retry-After does not shorten the wait).
+        let at_3h = Instant::now() + Duration::from_secs(3 * 60 * 60);
+        assert!(m.tick(at_3h, Duration::ZERO, false).is_none());
+        // +7h: due past the rung; the scripted SUCCESS clears failures
+        // and the override.
+        let at_7h = Instant::now() + Duration::from_secs(7 * 60 * 60);
+        let lease2 = m
+            .tick(at_7h, Duration::ZERO, false)
+            .expect("auto check due at +7h");
+        m.run_check(&lease2, SystemTime::UNIX_EPOCH);
+        assert_eq!(
+            m.status(),
+            UpdateStatus::UpToDate {
+                latest: CURRENT.into()
+            }
+        );
+        let inner = m.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert_eq!(inner.cadence.failures, 0);
+        assert_eq!(inner.cadence.retry_after_override, None);
     }
 
     #[test]

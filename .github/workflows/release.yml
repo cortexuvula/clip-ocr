@@ -56,6 +56,57 @@ jobs:
         with:
           script: |
             const tag = process.env.RELEASE_VERSION;
+            // The release must bind to the commit this run built
+            // (context.sha): on workflow_dispatch that is the last commit
+            // on the selected ref — exactly what every job checks out —
+            // and a NEW tag is created there via target_commitish below.
+            // If the tag already exists, resolve it to its commit and
+            // refuse when it points anywhere else, BEFORE deleting any
+            // draft: assets built from one commit must not ship under a
+            // tag that points at another.
+            //
+            // ONLY a 404 from getRef itself means "the tag is absent" (a
+            // new-tag run). Once the ref exists, every step below must
+            // verify loudly: a getTag failure (e.g. a pruned tag object
+            // behind an existing ref) must FAIL the job, never downgrade
+            // the provenance check to "tag absent" and proceed unverified.
+            const ref = await github.rest.git.getRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: `tags/${tag}`
+            }).catch((e) => {
+              if (e.status !== 404) throw e;
+              return null;
+            });
+            if (ref) {
+              // An annotated tag's ref points at a tag object, not a
+              // commit — resolve through it to the tagged commit.
+              // Deliberately NOT wrapped in a catch: the ref exists, so
+              // a failure here must fail the job, not skip verification.
+              let taggedSha = ref.data.object.sha;
+              if (ref.data.object.type === 'tag') {
+                const annotated = await github.rest.git.getTag({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  tag_sha: taggedSha
+                });
+                taggedSha = annotated.data.object.sha;
+              }
+              // Pushing an ANNOTATED tag sets context.sha to the tag
+              // object rather than the commit (GITHUB_SHA depends on the
+              // event), and that push is what created the tag — accept it.
+              // On workflow_dispatch context.sha is always a commit, so
+              // this can never excuse a genuine mismatch there.
+              if (taggedSha !== context.sha && ref.data.object.sha !== context.sha) {
+                core.setFailed(
+                  `Tag ${tag} exists and points at commit ${taggedSha}, but this ` +
+                  `run built ${context.sha} (event: ${context.eventName}). Refusing ` +
+                  `to attach the release to a different commit — move or delete ` +
+                  `the tag first.`
+                );
+                return;
+              }
+            }
             // Dedupe: a prior run (or a tag re-move) may have left a DRAFT
             // for this tag. Delete drafts only — a published release for this
             // tag means the version already shipped and must NOT be silently
@@ -83,10 +134,14 @@ jobs:
             } catch (e) {
               if (e.status !== 404) throw e;
             }
+            // target_commitish is unused when the tag already exists (tag
+            // pushes), so this only pins NEW (workflow_dispatch) tags —
+            // to the commit this run checked out and built.
             const { data } = await github.rest.repos.createRelease({
               owner: context.repo.owner,
               repo: context.repo.repo,
               tag_name: tag,
+              target_commitish: context.sha,
               name: `ClipOCR ${tag}`,
               draft: true,
               prerelease: false
